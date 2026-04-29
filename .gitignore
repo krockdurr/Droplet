@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Qt settings stored locally (user-specific, not project config)
+# QSettings writes to the OS registry / ~/.config - nothing to ignore here.
+
+# Droplet session / project files saved by the user
+*.drp
+
+# Test outputs
+*.png
+*.svg
+*.pdf
+*.csv
+# Exception: keep any sample data files if you add them
+!data/
