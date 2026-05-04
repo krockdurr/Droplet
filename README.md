@@ -10,7 +10,7 @@ Droplet is a desktop application for loading, visualising, annotating, and proce
 
 | Category                | What it does                                                                                                                   |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Visualisation**       | Linear / log-Y plot, dark and bright themes, stacked multi-spectrum view (with mirror, fit-Y, lock-Y options)                 |
+| **Visualisation**       | Linear / log-Y plot, dark and bright themes, stacked multi-spectrum view (with mirror, fit-Y, lock-Y options)                  |
 | **File handling**       | Load folders or individual files (`.txt`, `.csv`, `.tsv`, `.dat`, `.asc`); drag-and-drop; virtual folders; recent file history |
 | **Overlays**            | Up to 10 simultaneous overlay spectra, each with its own colour, polarity filter, and dt filter                                |
 | **Peak annotation**     | Named peak lists with per-row colours, undo/redo, import/export (JSON), click-to-pick mode                                     |
@@ -18,13 +18,13 @@ Droplet is a desktop application for loading, visualising, annotating, and proce
 | **Recalibration**       | Automatic (quadratic TOF polynomial) and manual (user-chosen anchor peaks); single file or batch                               |
 | **Normalisation**       | Max-normalise or normalise to a specific m/z; single file or batch                                                             |
 | **Batch normalize**     | Normalize entire folders at once                                                                                               |
-| **Cluster detection**   | Find regularly-spaced series of peaks (e.g. water/solvent clusters); peak-list mode; click-to-select clusters                 |
+| **Cluster detection**   | Find regularly-spaced series of peaks (e.g. water/solvent clusters); peak-list mode; click-to-select clusters                  |
 | **Peak comparison**     | Highlight common and unique peaks across all visible spectra                                                                   |
-| **Peak area**           | Interactive range measurement, total spectrum area, per-peak-list area ratios, batch export, ratio modes                      |
+| **Peak area**           | Interactive range measurement, total spectrum area, per-peak-list area ratios, batch export, ratio modes                       |
 | **Minimap overlay**     | Thumbnail of the full spectrum with a viewport indicator for easy navigation                                                   |
 | **Zoom history**        | "Go to last zoom" context menu on the plot                                                                                     |
 | **Help system**         | Context-specific help dialogs for each feature area                                                                            |
-| **Tutorial**            | Interactive step-by-step tutorial (Help → Start Tutorial)                                                                     |
+| **Tutorial**            | Interactive step-by-step tutorial (Help → Start Tutorial)                                                                      |
 | **Export**              | PNG, SVG, PDF, CSV; copy to clipboard; print                                                                                   |
 | **Plotting tool**       | Separate figure editor (Appearance, Peaks, Annotations, Legend tabs) for publication figures                                   |
 | **Residuals viewer**    | Browse Δm/z residual files produced by batch recalibration                                                                     |
