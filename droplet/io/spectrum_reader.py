@@ -57,8 +57,31 @@ def read_spectrum_file(path, sep=None):
     return df[['mz', 'intensity']].reset_index(drop=True)
 
 
-def save_spectrum_df(data_df, path):
-    data_df.to_csv(path, sep='\t', index=False, header=False)
+def read_spectrum_headers(path):
+    """Return all '#' comment lines from a spectrum file as a list of strings."""
+    headers = []
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            for line in fh:
+                if line.startswith('#'):
+                    headers.append(line.rstrip('\n'))
+                else:
+                    break
+    except Exception:
+        pass
+    return headers
+
+
+def save_spectrum_df(data_df, path, src_path=None, process_tag=None):
+    with open(path, 'w', encoding='utf-8') as fh:
+        if src_path and os.path.isfile(str(src_path)):
+            if process_tag:
+                fh.write(f"#processed={process_tag}\n")
+            for hline in read_spectrum_headers(str(src_path)):
+                fh.write(hline + "\n")
+            fh.write("##########\n")
+        for row in data_df.itertuples(index=False):
+            fh.write(f"{row.mz}\t{row.intensity}\n")
 
 
 def spectrum_display_name(path):

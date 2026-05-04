@@ -180,7 +180,8 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
                 for cb, row in self._pl_checks:
                     if cb.isChecked():
                         pk_checks = self._pl_peak_checks.get(id(row), [])
-                        mzs.extend(mz for pk_cb, mz in pk_checks if pk_cb.isChecked())
+                        if pk_checks:
+                            mzs.extend(mz for pk_cb, mz in pk_checks if pk_cb.isChecked())
                 peak_list_mzs = mzs if mzs else None
 
             known_mzs = []

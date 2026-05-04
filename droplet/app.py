@@ -12,10 +12,6 @@
 
 import os
 import json
-
-
-import os
-import json
 import re
 import csv
 import io
@@ -57,7 +53,13 @@ import warnings
 warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 
-APP_VERSION = "2.6-dev"
+APP_VERSION = "2.6.2"
+
+from droplet.ui.windows.residuals_viewer import ResidualsViewerWindow
+from droplet.ui.windows.cluster_detection import ClusterDetectionWindow
+from droplet.ui.windows.peak_comparison import PeakComparisonWindow
+from droplet.ui.windows.peak_area import PeakAreaWindow
+from droplet.ui.windows.tutorial import TutorialOverlay
 
 
 
@@ -270,6 +272,20 @@ def read_spectrum_file(path, sep=None):
         raise ValueError("File contains no usable data rows.")
     return df[['mz', 'intensity']].reset_index(drop=True)
 
+def read_spectrum_headers(path):
+    """Return all '#' comment lines from a spectrum file as a list of strings."""
+    headers = []
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            for line in fh:
+                if line.startswith('#'):
+                    headers.append(line.rstrip('\n'))
+                else:
+                    break
+    except Exception:
+        pass
+    return headers
+
 # ─────────────────────────────────────────────
 #  Default peak colours
 # ─────────────────────────────────────────────
@@ -449,11 +465,14 @@ file_menu.addAction(open_files_action)
 file_menu.addSeparator()
 file_menu.addAction(refresh_action)
 file_menu.addSeparator()
-save_project_action = QtWidgets.QAction("Save Project…", main_win)
-save_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
+save_project_action    = QtWidgets.QAction("Save Project",     main_win)
+save_project_as_action = QtWidgets.QAction("Save Project As…", main_win)
+save_project_action.setShortcut(   QtGui.QKeySequence("Ctrl+S"))
+save_project_as_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
 open_project_action = QtWidgets.QAction("Open Project…", main_win)
 open_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+O"))
 file_menu.addAction(save_project_action)
+file_menu.addAction(save_project_as_action)
 file_menu.addAction(open_project_action)
 file_menu.addSeparator()
 recent_folders_menu = file_menu.addMenu("Recent Folders")
@@ -464,8 +483,11 @@ _stacked_mode    = settings.value("stacked_mode",       False, type=bool)
 _stacked_log_y   = settings.value("stacked_log_y",      False, type=bool)
 _stacked_mirror  = settings.value("stacked_mirror",     False, type=bool)
 _stacked_mirror_odd = settings.value("stacked_mirror_odd", False, type=bool)
-_sigma3_clip     = settings.value("sigma3_clip",    False, type=bool)
-_sigma3_n_sigma  = settings.value("sigma3_n_sigma", 1.0,   type=float)
+_sigma3_clip        = settings.value("sigma3_clip",        False, type=bool)
+_sigma3_n_sigma     = settings.value("sigma3_n_sigma",     1.0,   type=float)
+_stacked_fit_y      = settings.value("stacked_fit_y",      False, type=bool)
+_stacked_lock_y     = settings.value("stacked_lock_y",     False, type=bool)
+_stacked_lock_ymax  = settings.value("stacked_lock_ymax",  1.05,  type=float)
 
 view_menu = menu_bar.addMenu("View")
 
@@ -527,6 +549,37 @@ stacked_mirror_odd_action.toggled.connect(lambda v: (
     settings.setValue("stacked_mirror_odd", v),
     render_plot()))
 view_menu.addAction(stacked_mirror_odd_action)
+
+stacked_fit_y_action = QtWidgets.QAction("  Stacked: Fit Y to spectra", main_win, checkable=True)
+stacked_fit_y_action.setChecked(_stacked_fit_y)
+stacked_fit_y_action.setToolTip(
+    "Lock the Y range to [0, max intensity across all displayed spectra].")
+view_menu.addAction(stacked_fit_y_action)
+
+stacked_lock_y_action = QtWidgets.QAction("  Stacked: Lock Y to [0, x]", main_win, checkable=True)
+stacked_lock_y_action.setChecked(_stacked_lock_y)
+stacked_lock_y_action.setToolTip(
+    "Hard-lock the Y viewing range to [0, x] regardless of zoom or pan.\n"
+    "Set x with the spin box below.")
+view_menu.addAction(stacked_lock_y_action)
+
+_stacked_lock_ymax_container = QtWidgets.QWidget()
+_stacked_lock_ymax_layout = QtWidgets.QHBoxLayout(_stacked_lock_ymax_container)
+_stacked_lock_ymax_layout.setContentsMargins(28, 1, 8, 1)
+_stacked_lock_ymax_layout.addWidget(QtWidgets.QLabel("Y max:"))
+_stacked_lock_ymax_spin = QtWidgets.QDoubleSpinBox()
+_stacked_lock_ymax_spin.setRange(0.01, 1000.0)
+_stacked_lock_ymax_spin.setValue(_stacked_lock_ymax)
+_stacked_lock_ymax_spin.setSingleStep(0.05)
+_stacked_lock_ymax_spin.setDecimals(2)
+_stacked_lock_ymax_spin.setFixedWidth(75)
+_stacked_lock_ymax_spin.setEnabled(_stacked_lock_y)
+_stacked_lock_ymax_spin.setToolTip("Upper Y bound for 'Lock Y to [0, x]'")
+_stacked_lock_ymax_layout.addWidget(_stacked_lock_ymax_spin)
+_stacked_lock_ymax_wa = QtWidgets.QWidgetAction(main_win)
+_stacked_lock_ymax_wa.setDefaultWidget(_stacked_lock_ymax_container)
+view_menu.addAction(_stacked_lock_ymax_wa)
+
 mz_cursor_action = QtWidgets.QAction("Show m/z at Cursor", main_win, checkable=True)
 mz_cursor_action.setChecked(settings.value("mz_cursor", False, type=bool))
 view_menu.addAction(mz_cursor_action)
@@ -582,20 +635,21 @@ both_submenu.addAction(both_current_action)
 both_submenu.addAction(both_batch_action)
 
 analysis_menu.addSeparator()
+view_residuals_action = QtWidgets.QAction("View Recalibration Residuals…", main_win)
+analysis_menu.addAction(view_residuals_action)
+analysis_menu.addSeparator()
+
 normalize_submenu = analysis_menu.addMenu("Normalize Spectrum")
 normalize_current_action = QtWidgets.QAction("Normalize Current to File…", main_win)
 normalize_batch_action   = QtWidgets.QAction("Batch Normalize Folder…",    main_win)
 normalize_submenu.addAction(normalize_current_action)
 normalize_submenu.addAction(normalize_batch_action)
 
-view_residuals_action = QtWidgets.QAction("View Recalibration Residuals…", main_win)
-analysis_menu.addAction(view_residuals_action)
-
 # ── Analysis (new menu, separate from Processing) ──────────────
 new_analysis_menu        = menu_bar.addMenu("Analysis")
 cluster_detect_action    = QtWidgets.QAction("Cluster Detection…", main_win)
 new_analysis_menu.addAction(cluster_detect_action)
-area_action = QtWidgets.QAction("Measure Peak Area…", main_win)
+area_action = QtWidgets.QAction("Peak list area tools…", main_win)
 new_analysis_menu.addAction(area_action)
 peak_comparison_action = QtWidgets.QAction("Compare Common/Unique Peaks…", main_win)
 new_analysis_menu.addAction(peak_comparison_action)
@@ -636,8 +690,6 @@ plot_menu.addAction(export_svg_action)
 plot_menu.addAction(export_pdf_action)
 plot_menu.addSeparator()
 plot_menu.addAction(copy_plot_action)
-plot_menu.addSeparator()
-plot_menu.addAction(export_peaks_csv_action)
 plot_menu.addSeparator()
 plot_menu.addAction(print_action)
 plot_menu.addSeparator()
@@ -1139,6 +1191,12 @@ def _set_stacked_mode(val):
     stacked_mode_action.setChecked(val); stacked_mode_chk.setChecked(val)
     stacked_mode_action.blockSignals(False); stacked_mode_chk.blockSignals(False)
     stacked_logy_chk.setEnabled(val)   # grey out Log Y when not stacked
+    try:
+        plot.scene().sigMouseClicked.disconnect(plot_clicked)
+    except Exception:
+        pass
+    if not val:
+        plot.scene().sigMouseClicked.connect(plot_clicked)
     render_plot()
 
 def _set_stacked_logy(val):
@@ -1467,10 +1525,29 @@ def _area_show_result(mz_lo, mz_hi):
         return
 
     raw_area, corrected_area, n_pts, noise_floor = result
+    # Compute total corrected area for normalization (above 10.9 m/z threshold)
+    full_mz  = df['mz'].values
+    full_int = df['intensity'].values
+    thr_mask = full_mz >= 10.9
+    if thr_mask.sum() >= 2:
+        full_noise_floor = _estimate_noise_floor(full_int, n_sigma=3.0)
+        full_mz_thr  = full_mz[thr_mask]
+        full_int_thr = full_int[thr_mask]
+        full_raw   = float(np.trapz(full_int_thr, full_mz_thr))
+        full_floor = full_noise_floor * (full_mz_thr[-1] - full_mz_thr[0])
+        normalized_total_area_by_noise_floor = max(0.0, full_raw - full_floor)
+    else:
+        normalized_total_area_by_noise_floor = None
+    if normalized_total_area_by_noise_floor and normalized_total_area_by_noise_floor > 0:
+        norm_val = corrected_area / normalized_total_area_by_noise_floor
+        norm_str = f"\n  Normalized by total corrected area: {norm_val:.6f}"
+    else:
+        norm_str = "\n  Normalized by total corrected area: N/A"
     text = (
         f"Area  [{mz_lo:.2f} – {mz_hi:.2f}]\n"
         f"  Raw:       {raw_area:.6f}\n"
-        f"  Corrected to noise: {corrected_area:.6f}\n"
+        f"  Corrected to noise: {corrected_area:.6f}"
+        f"{norm_str}\n"
         f"  ({n_pts} pts, 3σ floor={noise_floor:.4f})"
     )
 
@@ -1864,8 +1941,17 @@ def snip_baseline(intensity, max_hwidth=40, smooth_iters=3, stop_flag=None):
 # ─────────────────────────────────────────────
 #  Save processed spectrum
 # ─────────────────────────────────────────────
-def save_spectrum_df(data_df, path):
-    data_df.to_csv(path, sep='\t', index=False, header=False)
+def save_spectrum_df(data_df, path, src_path=None, process_tag=None):
+    """Write spectrum to path, prepending original headers if src_path given."""
+    with open(path, 'w', encoding='utf-8') as fh:
+        if src_path and os.path.isfile(str(src_path)):
+            if process_tag:
+                fh.write(f"#processed={process_tag}\n")
+            for hline in read_spectrum_headers(str(src_path)):
+                fh.write(hline + "\n")
+            fh.write("##########\n")
+        for row in data_df.itertuples(index=False):
+            fh.write(f"{row.mz}\t{row.intensity}\n")
 
 # ─────────────────────────────────────────────
 #  Helpers
@@ -2906,8 +2992,11 @@ class PeakReviewWindow(QtWidgets.QWidget):
             if not out_path:
                 return   # user cancelled
 
+        _src_path = combo.currentData() or combo.currentText()
         try:
-            save_spectrum_df(corrected_df, out_path)
+            save_spectrum_df(corrected_df, out_path,
+                             src_path=_src_path,
+                             process_tag="manual_recalibrated")
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Save Failed", f"Could not save:\n{out_path}\n\n{e}"); return
@@ -2920,7 +3009,7 @@ class PeakReviewWindow(QtWidgets.QWidget):
             from datetime import datetime as _dt
             _ts_host._residuals_session_ts = _dt.now().strftime("%d.%m.%Y - %H.%M.%S")
         _session_ts = _ts_host._residuals_session_ts
-        # Non-batch: the save folder may differ per file - use the output folder
+        # Non-batch: the save folder may differ per file — use the output folder
         # but keep the timestamp constant so all files share one Residuals dir.
         _res_save_folder = os.path.dirname(out_path)
         try:
@@ -3986,7 +4075,9 @@ def _batch_run(process_fn, files, save_folder, suffix, title, parallel=False, n_
                 processed = process_fn(raw)
                 stem, ext = os.path.splitext(os.path.basename(path))
                 out_path = os.path.join(save_folder, stem + suffix + (ext or ".txt"))
-                save_spectrum_df(processed, out_path)
+                save_spectrum_df(processed, out_path,
+                                 src_path=path,
+                                 process_tag=suffix.strip("_"))
             except Exception as e:
                 errors.append(f"{os.path.basename(path)}: {e}")
     else:
@@ -4117,194 +4208,7 @@ def _save_residuals(save_folder, filename, summary_df, ts=None,
 #  RESIDUALS VIEWER
 # ═════════════════════════════════════════════════════════════════════════════
 
-class ResidualsViewerWindow(QtWidgets.QDialog):
-    """
-    Browse a Residuals folder and display:
-      • Left panel  - dense residuals spectrum (original m/z vs Δm/z curve)
-      • Right panel - calibration anchor scatter (per-peak displacement bar chart)
-    """
-
-    def __init__(self, res_folder=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Residuals Viewer")
-        self.resize(1050, 600)
-        self.setMinimumSize(700, 420)
-
-        # ── Top bar ──────────────────────────────────────────────────────────
-        top = QtWidgets.QHBoxLayout()
-        self._folder_lbl = QtWidgets.QLabel("No folder loaded")
-        self._folder_lbl.setStyleSheet("color: gray; font-size: 9pt;")
-        self._folder_lbl.setWordWrap(False)
-        browse_btn = QtWidgets.QPushButton("Browse Residuals Folder…")
-        browse_btn.clicked.connect(self._browse)
-        top.addWidget(browse_btn)
-        top.addWidget(self._folder_lbl, stretch=1)
-
-        # ── File list ────────────────────────────────────────────────────────
-        self._file_list = QtWidgets.QListWidget()
-        self._file_list.setMinimumWidth(200)
-        self._file_list.setMaximumWidth(280)
-        self._file_list.currentRowChanged.connect(self._on_select)
-
-        # ── Plot area (two pyqtgraph plots side by side) ─────────────────────
-        self._pg_widget = pg.GraphicsLayoutWidget()
-
-        self._curve_plot = self._pg_widget.addPlot(row=0, col=0,
-                                                    title="Δm/z curve (dense)")
-        self._curve_plot.setLabel('bottom', 'Original m/z')
-        self._curve_plot.setLabel('left',   'Δ m/z')
-        self._curve_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._curve_plot.addLine(y=0, pen=pg.mkPen('r', width=1, style=QtCore.Qt.PenStyle.DashLine))
-
-        self._bar_plot = self._pg_widget.addPlot(row=0, col=1,
-                                                  title="Calibration anchors")
-        self._bar_plot.setLabel('bottom', 'Original m/z')
-        self._bar_plot.setLabel('left',   'Δ m/z')
-        self._bar_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._bar_plot.addLine(y=0, pen=pg.mkPen('r', width=1, style=QtCore.Qt.PenStyle.DashLine))
-
-        # ── Info label ───────────────────────────────────────────────────────
-        self._info_lbl = QtWidgets.QLabel("")
-        self._info_lbl.setStyleSheet("font-size: 9pt; color: gray;")
-
-        # ── Layout ───────────────────────────────────────────────────────────
-        left_col = QtWidgets.QVBoxLayout()
-        left_col.addWidget(QtWidgets.QLabel("<b>Files in folder</b>"))
-        left_col.addWidget(self._file_list)
-
-        right_col = QtWidgets.QVBoxLayout()
-        right_col.addLayout(top)
-        right_col.addWidget(self._pg_widget, stretch=1)
-        right_col.addWidget(self._info_lbl)
-
-        body = QtWidgets.QHBoxLayout()
-        body.addLayout(left_col)
-        body.addLayout(right_col, stretch=1)
-
-        main_lay = QtWidgets.QVBoxLayout(self)
-        main_lay.addLayout(body)
-
-        # ── Close button ─────────────────────────────────────────────────────
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch(); btn_row.addWidget(close_btn)
-        main_lay.addLayout(btn_row)
-
-        self._res_folder = None
-        self._file_stems = []   # parallel list: stem names for listed items
-
-        if res_folder:
-            self._load_folder(res_folder)
-
-    # ── Folder loading ────────────────────────────────────────────────────────
-
-    def _browse(self):
-        folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Select a Residuals folder", "")
-        if folder:
-            self._load_folder(folder)
-
-    def _load_folder(self, folder):
-        self._res_folder = folder
-        self._folder_lbl.setText(folder)
-        self._file_list.clear()
-        self._file_stems.clear()
-
-        # Find all *_residuals_spectrum.txt files
-        import glob
-        spectra = sorted(glob.glob(os.path.join(folder, "*_residuals_spectrum.txt")))
-        for path in spectra:
-            stem = os.path.basename(path).replace("_residuals_spectrum.txt", "")
-            self._file_stems.append(stem)
-            self._file_list.addItem(stem)
-
-        if self._file_list.count() > 0:
-            self._file_list.setCurrentRow(0)
-        else:
-            self._info_lbl.setText("No residuals files found in this folder.")
-
-    # ── Selection / plotting ──────────────────────────────────────────────────
-
-    def _on_select(self, row):
-        if row < 0 or row >= len(self._file_stems):
-            return
-        stem = self._file_stems[row]
-        spec_path  = os.path.join(self._res_folder, stem + "_residuals_spectrum.txt")
-        table_path = os.path.join(self._res_folder, stem + "_residuals_table.csv")
-        self._draw(spec_path, table_path, stem)
-
-    def _draw(self, spec_path, table_path, stem):
-        self._curve_plot.clear()
-        self._bar_plot.clear()
-        self._curve_plot.addLine(y=0, pen=pg.mkPen('r', width=1,
-                                  style=QtCore.Qt.PenStyle.DashLine))
-        self._bar_plot.addLine(y=0, pen=pg.mkPen('r', width=1,
-                                style=QtCore.Qt.PenStyle.DashLine))
-
-        # Palette for per-peak-list coloring
-        _PL_COLORS = ['#4e9de0', '#e8944b', '#5cba6e', '#c46ee8',
-                      '#e8c84b', '#4be8d8', '#e84b7e', '#a0a0a0']
-
-        # ── Dense curve - split by peak_list column if present ───────────────
-        if os.path.isfile(spec_path):
-            try:
-                spec_df = pd.read_csv(spec_path, sep='\t', comment='#',
-                                      header=None, names=['mz', 'delta', 'peak_list'])
-                spec_df = spec_df.sort_values('mz')
-                spec_df['peak_list'] = spec_df['peak_list'].fillna('').astype(str).str.strip()
-                pl_groups = spec_df.groupby('peak_list', sort=False)
-                for ci, (pl_name, grp) in enumerate(pl_groups):
-                    color = _PL_COLORS[ci % len(_PL_COLORS)]
-                    label = pl_name if pl_name else f"Series {ci+1}"
-                    self._curve_plot.plot(
-                        grp['mz'].values.astype(float),
-                        grp['delta'].values.astype(float),
-                        pen=pg.mkPen(color, width=1.5),
-                        name=label)
-            except Exception as e:
-                self._info_lbl.setText(f"Could not read spectrum file: {e}")
-
-        # ── Anchor bar chart - colored by peak_list ───────────────────────────
-        if os.path.isfile(table_path):
-            try:
-                tbl  = pd.read_csv(table_path)
-                cols = list(tbl.columns)
-                if len(cols) >= 3:
-                    orig   = tbl[cols[0]].values.astype(float)
-                    delta  = tbl[cols[2]].values.astype(float)
-                    pl_col = tbl["peak_list"].fillna('').astype(str).str.strip() \
-                             if "peak_list" in tbl.columns \
-                             else pd.Series([''] * len(orig))
-                    pl_names  = list(dict.fromkeys(pl_col))  # ordered unique
-                    pl_ci_map = {n: i for i, n in enumerate(pl_names)}
-                    for x, d, pl in zip(orig, delta, pl_col):
-                        ci    = pl_ci_map.get(pl, 0)
-                        color = _PL_COLORS[ci % len(_PL_COLORS)]
-                        bar   = pg.PlotDataItem([x, x], [0, d],
-                                               pen=pg.mkPen(color, width=3))
-                        self._bar_plot.addItem(bar)
-                    for x, d, pl in zip(orig, delta, pl_col):
-                        ci    = pl_ci_map.get(pl, 0)
-                        color = _PL_COLORS[ci % len(_PL_COLORS)]
-                        sc = pg.ScatterPlotItem(x=[x], y=[d], size=10,
-                                               pen=pg.mkPen('w', width=0.5),
-                                               brush=pg.mkBrush(color))
-                        self._bar_plot.addItem(sc)
-                        lbl_text = pl if pl else ""
-                        lbl = pg.TextItem(f"{lbl_text}  Δ{d:+.2f}",
-                                          anchor=(0.5, 1.0), color='w')
-                        lbl.setPos(x, d)
-                        self._bar_plot.addItem(lbl)
-                    n_pts = len(orig)
-                    rms   = float(np.sqrt(np.mean(delta**2)))
-                    max_d = float(np.max(np.abs(delta)))
-                    self._info_lbl.setText(
-                        f"{stem}  -  {n_pts} anchor(s)  |  "
-                        f"RMS Δ = {rms:.4f}  |  max |Δ| = {max_d:.4f}")
-            except Exception as e:
-                self._info_lbl.setText(f"Could not read table file: {e}")
-
+# ResidualsViewerWindow — defined in droplet/ui/windows/residuals_viewer.py
 
 def _batch_run_recal(files, save_folder, suffix, title, do_baseline=False,
                      parallel=False, n_workers=1):
@@ -4737,1031 +4641,13 @@ def run_cluster_detection(spacings_input, tol, min_chain, min_snr, min_pct,
     return deduped
 
 
-class ClusterDetectionWindow(QtWidgets.QWidget):
-    """
-    Non-modal window: parameter controls on top, results grouped by cluster below.
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent, QtCore.Qt.WindowType.Window)
-        self.setWindowTitle("Cluster Detection")
-        self.resize(720, 580)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+# ClusterDetectionWindow — defined in droplet/ui/windows/cluster_detection.py
 
-        self._clusters                 = []
-        self._inc_chks                 = []
-        self._scatter_items_by_cluster = []
-        self._group_boxes              = []
-        self._selected_cluster         = None
-        self._scatter_click_handled    = False
-        self._click_cycle              = []
-        self._click_cycle_pos          = None
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(6)
-        root.setContentsMargins(8, 8, 8, 8)
-
-        # ── Parameter bar ──────────────────────────────────────────────
-        param_box = QtWidgets.QGroupBox("Detection parameters")
-        param_grid = QtWidgets.QGridLayout(param_box)
-        param_grid.setSpacing(6)
-
-        param_grid.addWidget(QtWidgets.QLabel("Spacings (Da, comma-sep; empty = auto):"), 0, 0)
-        self._spacing_edit = QtWidgets.QLineEdit()
-        self._spacing_edit.setText(settings.value("cluster_spacings", ""))
-        self._spacing_edit.setToolTip(
-            "Comma-separated candidate spacings in Da.\n"
-            "Leave empty to let the algorithm discover spacings automatically.")
-        param_grid.addWidget(self._spacing_edit, 0, 1, 1, 3)
-
-        param_grid.addWidget(QtWidgets.QLabel("Tolerance (±Da):"), 1, 0)
-        self._tol_spin = QtWidgets.QDoubleSpinBox()
-        self._tol_spin.setRange(0.01, 5.0); self._tol_spin.setDecimals(3)
-        self._tol_spin.setSingleStep(0.05); self._tol_spin.setValue(float(settings.value("cluster_tol", 0.3)))
-        param_grid.addWidget(self._tol_spin, 1, 1)
-
-        param_grid.addWidget(QtWidgets.QLabel("Min chain length:"), 1, 2)
-        self._chain_spin = QtWidgets.QSpinBox()
-        self._chain_spin.setRange(2, 20); self._chain_spin.setValue(int(settings.value("cluster_min_chain", 2)))
-        param_grid.addWidget(self._chain_spin, 1, 3)
-
-        param_grid.addWidget(QtWidgets.QLabel("Min SNR:"), 2, 0)
-        self._snr_spin = QtWidgets.QDoubleSpinBox()
-        self._snr_spin.setRange(0.0, 100.0); self._snr_spin.setDecimals(1)
-        self._snr_spin.setSingleStep(0.1); self._snr_spin.setValue(float(settings.value("cluster_snr", 1.5)))
-        param_grid.addWidget(self._snr_spin, 2, 1)
-
-        param_grid.addWidget(QtWidgets.QLabel("Min intensity %:"), 2, 2)
-        self._pct_spin = QtWidgets.QDoubleSpinBox()
-        self._pct_spin.setRange(0.0, 50.0); self._pct_spin.setDecimals(2)
-        self._pct_spin.setSingleStep(0.1); self._pct_spin.setValue(float(settings.value("cluster_pct", 5.0)))
-        self._pct_spin.setSuffix(" %")
-        param_grid.addWidget(self._pct_spin, 2, 3)
-
-        detect_btn = QtWidgets.QPushButton("🔍  Detect Clusters")
-        detect_btn.setFixedHeight(30)
-        detect_btn.clicked.connect(self._run_detection)
-        param_grid.addWidget(detect_btn, 3, 0, 1, 4)
-
-        root.addWidget(param_box)
-
-        # ── Peak-list mode selector ────────────────────────────────────
-        self._pl_box = QtWidgets.QGroupBox("Use Peak List(s) instead of spectrum")
-        self._pl_box.setCheckable(True)
-        self._pl_box.setChecked(False)
-        self._pl_box.setToolTip(
-            "When enabled, detection runs only on the m/z values in the\n"
-            "selected peak list(s). Spacings are discovered automatically.\n"
-            "SNR / intensity % filters are ignored.")
-        pl_layout = QtWidgets.QVBoxLayout(self._pl_box)
-        pl_layout.setSpacing(3)
-        self._pl_checks = []   # list of (QCheckBox, row_dict)
-        # _pl_peak_checks: row_dict id -> list of (QCheckBox, mz_value)
-        self._pl_peak_checks = {}
-        for row in custom_peak_rows:
-            lbl = row["label_input"].text().strip() or "Unnamed"
-            # Row-level checkbox (enable/disable the whole list)
-            row_cb = QtWidgets.QCheckBox(lbl)
-            row_cb.setStyleSheet("font-weight: bold;")
-            pl_layout.addWidget(row_cb)
-            peak_checks = []
-            peaks = parse_peaks_text(row["peaks_input"].text())
-            if peaks:
-                peak_container = QtWidgets.QWidget()
-                peak_layout = QtWidgets.QHBoxLayout(peak_container)
-                peak_layout.setContentsMargins(20, 0, 0, 0)
-                peak_layout.setSpacing(4)
-                for mz in peaks:
-                    pk_cb = QtWidgets.QCheckBox(f"{mz:.4g}")
-                    pk_cb.setChecked(True)
-                    pk_cb.setToolTip(f"Include m/z {mz:.4g} in cluster detection")
-                    peak_layout.addWidget(pk_cb)
-                    peak_checks.append((pk_cb, mz))
-                peak_layout.addStretch()
-                pl_layout.addWidget(peak_container)
-            self._pl_checks.append((row_cb, row))
-            self._pl_peak_checks[id(row)] = peak_checks
-        if not self._pl_checks:
-            pl_layout.addWidget(QtWidgets.QLabel("(no peak lists defined)"))
-        self._pl_box.toggled.connect(self._on_pl_mode_toggled)
-        root.addWidget(self._pl_box)
-
-        # ── Results scroll area ────────────────────────────────────────
-        self._scroll = QtWidgets.QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._results_widget = QtWidgets.QWidget()
-        self._results_layout = QtWidgets.QVBoxLayout(self._results_widget)
-        self._results_layout.setContentsMargins(4, 4, 4, 4)
-        self._results_layout.setSpacing(6)
-        self._results_layout.addStretch()
-        self._scroll.setWidget(self._results_widget)
-        root.addWidget(self._scroll)
-
-        self._status_lbl = QtWidgets.QLabel("Run detection to see results.")
-        self._status_lbl.setStyleSheet("color: gray; font-size: 11px;")
-        root.addWidget(self._status_lbl)
-
-        # ── Bottom buttons ─────────────────────────────────────────────
-        btn_row = QtWidgets.QHBoxLayout()
-        self._add_btn = QtWidgets.QPushButton("➕  Add selected clusters to Peak Lists")
-        self._add_btn.setEnabled(False)
-        self._add_btn.clicked.connect(self._add_to_peak_lists)
-        btn_row.addWidget(self._add_btn)
-        btn_row.addStretch()
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
-
-
-    def _on_pl_mode_toggled(self, enabled):
-        """Grey out spectrum-only controls when peak-list mode is active."""
-        for widget in (self._spacing_edit, self._snr_spin, self._pct_spin):
-            widget.setEnabled(not enabled)
-
-    # ── Detection ─────────────────────────────────────────────────────
-    def _run_detection(self):
-        if df is None:
-            QtWidgets.QMessageBox.warning(self, "No spectrum", "Load a spectrum first.")
-            return
-    
-        progress = _make_progress_dialog(
-            "Cluster Detection",
-            f"Detecting clusters across {max(1, min(multiprocessing.cpu_count()-1, 8))} threads…",
-            cancellable=False)
-        app.processEvents()
-        try:
-            # Collect m/z from checked peak lists (if peak-list mode is on)
-            peak_list_mzs = None
-            if self._pl_box.isChecked():
-                mzs = []
-                for cb, row in self._pl_checks:
-                    if cb.isChecked():
-                        pk_checks = self._pl_peak_checks.get(id(row), [])
-                        if pk_checks:
-                            # Use only individually-checked peaks
-                            mzs.extend(mz for pk_cb, mz in pk_checks if pk_cb.isChecked())
-                        else:
-                            # No individual checkboxes (empty list) - skip
-                            pass
-                peak_list_mzs = mzs if mzs else None
-
-            self._clusters = run_cluster_detection(
-                spacings_input=self._spacing_edit.text(),
-                tol=self._tol_spin.value(),
-                min_chain=self._chain_spin.value(),
-                min_snr=self._snr_spin.value(),
-                min_pct=self._pct_spin.value(),
-                peak_list_mzs=peak_list_mzs,
-            )
-        except Exception as e:
-            progress.close()
-            QtWidgets.QMessageBox.warning(self, "Detection Error", str(e))
-            return
-        progress.close()
-        self._rebuild_results()
-
-    # ── Build result UI ────────────────────────────────────────────────
-    def _rebuild_results(self):
-        # Clear old scatter
-        _clear_cluster_scatter()
-        self._scatter_items_by_cluster.clear()
-        self._group_boxes.clear()
-        self._selected_cluster = None
-
-        # Clear old result widgets
-        while self._results_layout.count():
-            item = self._results_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-
-        self._inc_chks.clear()
-
-        if not self._clusters:
-            self._status_lbl.setText("No clusters found. Try lowering Min intensity % or Min chain length.")
-            self._add_btn.setEnabled(False)
-            self._results_layout.addStretch()
-            return
-
-        self._status_lbl.setText(
-            f"{len(self._clusters)} cluster(s) detected.  "
-            "✦ = peak overlaps a known peak list entry.")
-        self._add_btn.setEnabled(True)
-
-        for ci, cluster in enumerate(self._clusters):
-            color_hex = OVERLAY_COLORS[ci % len(OVERLAY_COLORS)]
-            symbol    = _CLUSTER_SYMBOLS[ci % len(_CLUSTER_SYMBOLS)]
-            spacing   = cluster['spacing']
-            members   = cluster['members']   # [(mz, intensity, is_known), ...]
-
-            # ── Group box ──────────────────────────────────────────────
-            gb = QtWidgets.QGroupBox()
-            gb.setStyleSheet(
-                f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                f"margin-top: 6px; padding-top: 4px; }}")
-            gb_vbox = QtWidgets.QVBoxLayout(gb)
-            gb_vbox.setContentsMargins(6, 2, 6, 6)
-            gb_vbox.setSpacing(3)
-
-            # Header
-            hdr_row = QtWidgets.QHBoxLayout()
-            swatch = QtWidgets.QLabel()
-            swatch.setFixedSize(14, 14)
-            swatch.setStyleSheet(
-                f"background-color: {color_hex}; border: 1px solid gray; border-radius: 2px;")
-            hdr_row.addWidget(swatch)
-            hdr_lbl = QtWidgets.QLabel(
-                f"<b>Cluster {ci+1}</b>  -  Δ = {spacing:.3f} Da  "
-                f"({len(members)} peaks)")
-            hdr_lbl.setStyleSheet(f"color: {color_hex};")
-            hdr_row.addWidget(hdr_lbl)
-            hdr_row.addStretch()
-
-            all_none_btn = QtWidgets.QPushButton("None")
-            all_none_btn.setFixedSize(46, 20)
-            all_none_btn.setCheckable(True)
-            all_none_btn.setStyleSheet("QPushButton { font-size: 10px; padding: 0 4px; }"
-                                       "QPushButton:checked { background: #444; color: #aaa; }")
-            hdr_row.addWidget(all_none_btn)
-            gb_vbox.addLayout(hdr_row)
-
-            # Column headers
-            col_hdr = QtWidgets.QHBoxLayout()
-            col_hdr.addSpacing(20)
-            for txt, w in [("m/z", 100), ("Intensity", 110)]:
-                l = QtWidgets.QLabel(f"<small><i>{txt}</i></small>")
-                l.setFixedWidth(w)
-                l.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                col_hdr.addWidget(l)
-            col_hdr.addWidget(QtWidgets.QLabel("<small><i>Include</i></small>"))
-            col_hdr.addStretch()
-            gb_vbox.addLayout(col_hdr)
-
-            group_chks = []   # (mz, QCheckBox)
-
-            for mz, intensity, is_known in members:
-                peak_row = QtWidgets.QWidget()
-                pr_layout = QtWidgets.QHBoxLayout(peak_row)
-                pr_layout.setContentsMargins(20, 0, 0, 0)
-                pr_layout.setSpacing(4)
-
-                star = " ✦" if is_known else ""
-                mz_lbl = QtWidgets.QLabel(f"{mz:.4f}{star}")
-                mz_lbl.setFixedWidth(100)
-                mz_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                if is_known:
-                    mz_lbl.setStyleSheet("color: #f0a000;")
-                    mz_lbl.setToolTip("This m/z overlaps a known peak list entry")
-                    mz_lbl.setMouseTracking(True)
-
-                int_lbl = QtWidgets.QLabel(f"{intensity:.3g}")
-                int_lbl.setFixedWidth(110)
-                int_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                int_lbl.setStyleSheet("color: gray; font-size: 11px;")
-
-                chk = QtWidgets.QCheckBox()
-                chk.setChecked(True)
-
-                pr_layout.addWidget(mz_lbl)
-                pr_layout.addWidget(int_lbl)
-                pr_layout.addWidget(chk)
-                pr_layout.addStretch()
-                gb_vbox.addWidget(peak_row)
-                group_chks.append((mz, chk))
-
-            self._inc_chks.append(group_chks)
-
-            # Cascade: uncheck → uncheck all higher m/z in group
-            def _make_cascade(chks_list):
-                def _on(checked, src_mz):
-                    if checked:
-                        return
-                    for mz, chk in chks_list:
-                        if mz > src_mz:
-                            chk.blockSignals(True)
-                            chk.setChecked(False)
-                            chk.blockSignals(False)
-                return _on
-            cascade = _make_cascade(group_chks)
-            for mz, chk in group_chks:
-                chk.toggled.connect(lambda checked, m=mz, fn=cascade: fn(checked, m))
-
-            # All/None button
-            def _make_all_none(chks_list, btn):
-                def _on(pressed):
-                    for _, chk in chks_list:
-                        chk.blockSignals(True)
-                        chk.setChecked(not pressed)
-                        chk.blockSignals(False)
-                    btn.setText("All" if pressed else "None")
-                return _on
-            all_none_btn.toggled.connect(_make_all_none(group_chks, all_none_btn))
-
-            self._group_boxes.append(gb)
-            def _make_gb_click(idx):
-                def _press(event):
-                    if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        self._select_cluster_direct(idx)
-                    super(QtWidgets.QGroupBox, gb).mousePressEvent(event)
-                return _press
-            gb.mousePressEvent = _make_gb_click(ci)
-            self._results_layout.addWidget(gb)
-
-            # ── Draw scatter for this cluster ──────────────────────────
-            mz_arr  = np.array([m[0] for m in members])
-            int_arr = np.array([m[1] for m in members])
-            y_arr   = np.where(int_arr > 0, np.log10(int_arr) + 0.05, 0.0)
-            c       = pg.mkColor(color_hex); c.setAlpha(210)
-            scatter = pg.ScatterPlotItem(
-                x=mz_arr, y=y_arr,
-                symbol=symbol, size=13,
-                pen=pg.mkPen(color_hex, width=1.5),
-                brush=pg.mkBrush(c),
-            )
-            plot.addItem(scatter)
-            _cluster_scatter_items.append(scatter)
-            self._scatter_items_by_cluster.append(scatter)
-            scatter.sigClicked.connect(
-                lambda item, pts, ev, i=ci: self._select_cluster(i, clicked_pts=pts))
-
-        try:
-            plot.scene().sigMouseClicked.disconnect(self._on_plot_background_click)
-        except Exception:
-            pass
-        plot.scene().sigMouseClicked.connect(self._on_plot_background_click)
-        self._results_layout.addStretch()
-
-    # ── Add to peak lists ──────────────────────────────────────────────
-    def _add_to_peak_lists(self):
-        added = 0
-        for ci, (cluster, group_chks) in enumerate(zip(self._clusters, self._inc_chks)):
-            included_mz = [mz for mz, chk in group_chks if chk.isChecked()]
-            if not included_mz:
-                continue
-            peaks_text = ", ".join(f"{mz:.4f}" for mz in included_mz)
-            color = QtGui.QColor(OVERLAY_COLORS[ci % len(OVERLAY_COLORS)])
-            add_peak_row(
-                checked=True,
-                color=color,
-                peaks_text=peaks_text,
-                label_text=f"Cluster {ci+1}",
-            )
-            added += 1
-        if added:
-            open_peaks_window()
-            self._status_lbl.setText(
-                f"✓ Added {added} cluster(s) to Peak Lists.")
-        else:
-            self._status_lbl.setText("Nothing to add - all peaks are unchecked.")
-
-    def _select_cluster(self, idx, clicked_pts=None):
-        self._scatter_click_handled = True
-    
-        # Find all clusters that have a point at the same position as what was clicked
-        if clicked_pts is not None and len(clicked_pts) > 0:
-            # Get the position of the clicked point
-            cx = clicked_pts[0].pos().x()
-            cy = clicked_pts[0].pos().y()
-            SNAP = 0.5  # Da tolerance for "same position"
-    
-            # Check if this is the same spot as last time
-            if self._click_cycle_pos is not None:
-                px, py = self._click_cycle_pos
-                same_spot = abs(cx - px) < SNAP
-            else:
-                same_spot = False
-    
-            if not same_spot or idx not in self._click_cycle:
-                # New spot - rebuild cycle list
-                candidates = []
-                for i, scatter in enumerate(self._scatter_items_by_cluster):
-                    xs = scatter.getData()[0]
-                    if xs is None:
-                        continue
-                    if np.any(np.abs(xs - cx) < SNAP):
-                        candidates.append(i)
-                self._click_cycle = candidates
-                self._click_cycle_pos = (cx, cy)
-                # Start with the clicked one first
-                if idx in self._click_cycle:
-                    self._click_cycle.remove(idx)
-                    self._click_cycle.insert(0, idx)
-            
-    
-        # If no cycle built (e.g. called from group box), just select directly
-        if not self._click_cycle:
-            self._click_cycle = [idx]
-            self._click_cycle_pos = None
-    
-        # Advance through cycle
-        if self._selected_cluster in self._click_cycle:
-            current_pos = self._click_cycle.index(self._selected_cluster)
-            next_pos = (current_pos + 1) % len(self._click_cycle)
-            next_idx = self._click_cycle[next_pos]
-        else:
-            next_idx = self._click_cycle[0]
-    
-        if self._selected_cluster == next_idx and len(self._click_cycle) == 1:
-            # Only one cluster here, toggle off
-            self._selected_cluster = None
-            self._apply_opacity(None)
-        else:
-            self._selected_cluster = next_idx
-            self._apply_opacity(next_idx)
-            
-    def _select_cluster_direct(self, idx):
-        """Simple toggle for group box clicks - no cycle, click again anywhere to deselect."""
-        self._scatter_click_handled = True
-        self._click_cycle = []
-        self._click_cycle_pos = None
-        if self._selected_cluster == idx:
-            self._selected_cluster = None
-            self._apply_opacity(None)
-        else:
-            self._selected_cluster = idx
-            self._apply_opacity(idx)
-
-    def mousePressEvent(self, event):
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            if self._scatter_click_handled:
-                self._scatter_click_handled = False
-            else:
-                self._selected_cluster = None
-                self._click_cycle = []
-                self._click_cycle_pos = None
-                self._apply_opacity(None)
-        super().mousePressEvent(event)
-    
-    def _apply_opacity(self, selected_idx):
-        DIM_ALPHA = int(210 * 0.2)   # 80% reduction of the normal 210 alpha
-        FULL_ALPHA = 210
-    
-        for i, scatter in enumerate(self._scatter_items_by_cluster):
-            color_hex = OVERLAY_COLORS[i % len(OVERLAY_COLORS)]
-            c = pg.mkColor(color_hex)
-            if selected_idx is None or i == selected_idx:
-                c.setAlpha(FULL_ALPHA)
-                scatter.setPen(pg.mkPen(color_hex, width=1.5))
-            else:
-                c.setAlpha(DIM_ALPHA)
-                dim_pen = pg.mkColor(color_hex)
-                dim_pen.setAlpha(DIM_ALPHA)
-                scatter.setPen(pg.mkPen(dim_pen, width=1.5))
-            scatter.setBrush(pg.mkBrush(c))
-    
-        for i, gb in enumerate(self._group_boxes):
-            color_hex = OVERLAY_COLORS[i % len(OVERLAY_COLORS)]
-            if selected_idx is None or i == selected_idx:
-                gb.setStyleSheet(
-                    f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                    f"margin-top: 6px; padding-top: 4px; }}")
-                gb.setGraphicsEffect(None)
-            else:
-                gb.setStyleSheet(
-                    f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                    f"margin-top: 6px; padding-top: 4px; opacity: 0.2; }}")
-                effect = QtWidgets.QGraphicsOpacityEffect()
-                effect.setOpacity(0.2)
-                gb.setGraphicsEffect(effect)
-    
-    def _on_plot_background_click(self, event):
-        if event.button() != QtCore.Qt.MouseButton.LeftButton:
-            return
-        if self._scatter_click_handled:
-            self._scatter_click_handled = False
-            return
-        self._click_cycle = []          # ← add
-        self._click_cycle_pos = None    # ← add
-        self._selected_cluster = None
-        self._apply_opacity(None)
-
-    # ── Cleanup on close ───────────────────────────────────────────────
-    def closeEvent(self, event):
-        settings.setValue("cluster_spacings",  self._spacing_edit.text())
-        settings.setValue("cluster_tol",       self._tol_spin.value())
-        settings.setValue("cluster_min_chain", self._chain_spin.value())
-        settings.setValue("cluster_snr",       self._snr_spin.value())
-        settings.setValue("cluster_pct",       self._pct_spin.value())
-        try:
-            plot.scene().sigMouseClicked.disconnect(self._on_plot_background_click)
-        except Exception:
-            pass
-        _clear_cluster_scatter()
-        super().closeEvent(event)
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  PEAK COMPARISON WINDOW  (common / unique peaks across loaded spectra)
-# ═════════════════════════════════════════════════════════════════════════════
-
-_comparison_win_ref = None
-
-class PeakComparisonWindow(QtWidgets.QWidget):
-    """
-    Non-modal window.  Detects peaks in each visible spectrum, classifies
-    them as common (present in ALL spectra) or unique (present in only one),
-    then draws coloured InfiniteLines on the main plot.
-
-    Three opacity sliders control:
-        • background   - the spectrum curves themselves
-        • common peaks - green vertical lines
-        • unique peaks - per-spectrum coloured lines
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent, QtCore.Qt.WindowType.Window)
-        self.setWindowTitle("Compare Common / Unique Peaks")
-        self.resize(560, 500)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
-
-        self._lines = []          # all InfiniteLine items added to plot
-        self._active = False      # True once lines have been drawn
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(8)
-        root.setContentsMargins(10, 10, 10, 10)
-
-        # ── Detection parameters ───────────────────────────────────────
-        param_box = QtWidgets.QGroupBox("Detection parameters")
-        pg_layout = QtWidgets.QGridLayout(param_box)
-        pg_layout.setSpacing(6)
-
-        pg_layout.addWidget(QtWidgets.QLabel("Threshold mode:"), 0, 0)
-        self._mode_combo = QtWidgets.QComboBox()
-        self._mode_combo.addItems(["% of max intensity", "SNR"])
-        pg_layout.addWidget(self._mode_combo, 0, 1)
-
-        pg_layout.addWidget(QtWidgets.QLabel("Threshold value:"), 1, 0)
-        self._thr_spin = QtWidgets.QDoubleSpinBox()
-        self._thr_spin.setRange(0.0, 1000.0)
-        self._thr_spin.setDecimals(1)
-        self._thr_spin.setSingleStep(0.1)
-        self._thr_spin.setValue(5.0)
-        self._thr_spin.setSuffix(" %")
-        pg_layout.addWidget(self._thr_spin, 1, 1)
-
-        pg_layout.addWidget(QtWidgets.QLabel("Match tolerance (±Da):"), 2, 0)
-        self._tol_spin = QtWidgets.QDoubleSpinBox()
-        self._tol_spin.setRange(0.01, 5.0)
-        self._tol_spin.setDecimals(2)
-        self._tol_spin.setValue(0.3)
-        pg_layout.addWidget(self._tol_spin, 2, 1)
-
-        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        root.addWidget(param_box)
-
-        # ── Opacity sliders ────────────────────────────────────────────
-        op_box = QtWidgets.QGroupBox("Opacity")
-        op_layout = QtWidgets.QGridLayout(op_box)
-        op_layout.setSpacing(6)
-
-        def _make_slider(default):
-            s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
-            s.setRange(0, 100); s.setValue(default)
-            return s
-
-        op_layout.addWidget(QtWidgets.QLabel("Background spectra:"), 0, 0)
-        self._bg_slider = _make_slider(40)
-        op_layout.addWidget(self._bg_slider, 0, 1)
-        self._bg_lbl = QtWidgets.QLabel("40 %")
-        op_layout.addWidget(self._bg_lbl, 0, 2)
-
-        op_layout.addWidget(QtWidgets.QLabel("Common peaks:"), 1, 0)
-        self._common_slider = _make_slider(90)
-        op_layout.addWidget(self._common_slider, 1, 1)
-        self._common_lbl = QtWidgets.QLabel("90 %")
-        op_layout.addWidget(self._common_lbl, 1, 2)
-
-        op_layout.addWidget(QtWidgets.QLabel("Unique peaks:"), 2, 0)
-        self._unique_slider = _make_slider(70)
-        op_layout.addWidget(self._unique_slider, 2, 1)
-        self._unique_lbl = QtWidgets.QLabel("70 %")
-        op_layout.addWidget(self._unique_lbl, 2, 2)
-
-        self._bg_slider.valueChanged.connect(
-            lambda v: (self._bg_lbl.setText(f"{v} %"), self._apply_opacities()))
-        self._common_slider.valueChanged.connect(
-            lambda v: (self._common_lbl.setText(f"{v} %"), self._apply_opacities()))
-        self._unique_slider.valueChanged.connect(
-            lambda v: (self._unique_lbl.setText(f"{v} %"), self._apply_opacities()))
-        root.addWidget(op_box)
-
-        # ── Results summary ────────────────────────────────────────────
-        self._summary_lbl = QtWidgets.QLabel("Run detection to see results.")
-        self._summary_lbl.setWordWrap(True)
-        self._summary_lbl.setStyleSheet("color: gray; font-size: 12px;")
-        self._summary_lbl.setMinimumHeight(80)
-        root.addWidget(self._summary_lbl)
-
-        # ── Buttons ────────────────────────────────────────────────────
-        btn_row = QtWidgets.QHBoxLayout()
-        self._run_btn = QtWidgets.QPushButton("🔍  Detect Peaks")
-        self._run_btn.setFixedHeight(30)
-        self._run_btn.clicked.connect(self._run)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addStretch()
-        self._clear_btn = QtWidgets.QPushButton("Clear")
-        self._clear_btn.clicked.connect(self._clear_lines)
-        btn_row.addWidget(self._clear_btn)
-        root.addLayout(btn_row)
-
-    # ── Helpers ───────────────────────────────────────────────────────
-
-    def _on_mode_changed(self):
-        if self._mode_combo.currentText() == "SNR":
-            self._thr_spin.setSuffix("")
-            self._thr_spin.setValue(3.0)
-            self._thr_spin.setToolTip("Minimum signal-to-noise ratio")
-        else:
-            self._thr_spin.setSuffix(" %")
-            self._thr_spin.setValue(5.0)
-            self._thr_spin.setToolTip("% of spectrum maximum intensity")
-
-    def _collect_spectra(self):
-        """Return list of (data_df, color_hex, display_name) for all visible spectra."""
-        result = []
-        main_color = '#888888' if current_display == 'bright' else '#aaaaaa'
-        if main_toggle.isChecked() and df is not None:
-            name = spectrum_display_name(combo.currentData() or combo.currentText())
-            result.append((df, main_color, name))
-        for ov in overlay_list:
-            if ov["toggle"].isChecked() and ov["df"] is not None:
-                ov_path = ov["combo"].currentData() or ov["combo"].currentText()
-                name = (spectrum_display_name(ov_path)
-                        if not ov.get("is_processed") else ov["toggle"].text())
-                result.append((ov["df"], ov["color"], name))
-        return result
-
-    def _detect_peaks_in(self, data_df):
-        """Return sorted numpy array of detected m/z values."""
-        thr   = self._thr_spin.value()
-        mode  = "snr" if self._mode_combo.currentText() == "SNR" else "pct"
-        pk_mz, _ = _get_auto_peaks(data_df, thr, mode)
-        return np.sort(pk_mz)
-
-    def _classify(self, all_peaks_list, tol):
-        """
-        all_peaks_list: list of 1-D arrays of m/z values, one per spectrum.
-        Returns (common_mzs, unique_per_spectrum) where
-            common_mzs          - 1-D array of m/z values present in ALL spectra
-            unique_per_spectrum - list of 1-D arrays, one per spectrum
-        """
-        if not all_peaks_list:
-            return np.array([]), []
-
-        n = len(all_peaks_list)
-        if n == 1:
-            return np.array([]), [all_peaks_list[0]]
-
-        # For each peak in spectrum 0, check if a match exists in all others
-        common = []
-        for mz in all_peaks_list[0]:
-            if all(
-                np.any(np.abs(other - mz) <= tol)
-                for other in all_peaks_list[1:]
-            ):
-                common.append(mz)
-
-        common_arr = np.array(common)
-
-        # Unique: peaks not matched by any common m/z
-        unique = []
-        for peaks in all_peaks_list:
-            if len(common_arr) == 0:
-                unique.append(peaks.copy())
-            else:
-                mask = np.all(np.abs(peaks[:, None] - common_arr[None, :]) > tol, axis=1)
-                unique.append(peaks[mask])
-
-        return common_arr, unique
-
-    def _clear_lines(self):
-        for line in self._lines:
-            try:
-                plot.removeItem(line)
-            except Exception:
-                pass
-        self._lines.clear()
-        self._active = False
-        # Restore normal overlay opacity
-        overlay_opacity_slider.setValue(overlay_opacity_slider.value())
-        render_plot()
-
-    def _run(self):
-        self._clear_lines()
-
-        spectra = self._collect_spectra()
-        if len(spectra) < 2:
-            self._summary_lbl.setText(
-                "⚠  Need at least 2 visible spectra (main + at least one overlay).")
-            return
-
-        tol = self._tol_spin.value()
-        all_peaks = [self._detect_peaks_in(s[0]) for s in spectra]
-        total_detected = sum(len(p) for p in all_peaks)
-
-        if total_detected == 0:
-            self._summary_lbl.setText("No peaks detected. Try lowering the threshold.")
-            return
-
-        common_mzs, unique_lists = self._classify(all_peaks, tol)
-
-        # ── Draw common lines (green) ──────────────────────────────────
-        common_alpha = int(self._common_slider.value() / 100 * 255)
-        for mz in common_mzs:
-            pen = pg.mkPen(QtGui.QColor(0, 200, 80, common_alpha), width=1,
-                           style=QtCore.Qt.PenStyle.SolidLine)
-            line = pg.InfiniteLine(pos=mz, angle=90, movable=False, pen=pen)
-            plot.addItem(line, ignoreBounds=True)
-            self._lines.append(line)
-
-        # ── Draw unique lines (per-spectrum color) ─────────────────────
-        unique_alpha = int(self._unique_slider.value() / 100 * 255)
-        for (data_df, color_hex, name), unique_mzs in zip(spectra, unique_lists):
-            base_color = pg.mkColor(color_hex)
-            for mz in unique_mzs:
-                c = QtGui.QColor(base_color)
-                c.setAlpha(unique_alpha)
-                pen = pg.mkPen(c, width=1,
-                               style=QtCore.Qt.PenStyle.DashLine)
-                line = pg.InfiniteLine(pos=mz, angle=90, movable=False, pen=pen)
-                plot.addItem(line, ignoreBounds=True)
-                self._lines.append(line)
-
-        self._active = True
-        self._apply_opacities()
-
-        # ── Summary text ───────────────────────────────────────────────
-        lines = [
-            f"<b style='font-size:13px'>Comparison summary</b><br>"
-            f"<span style='color:gray'>{len(spectra)} spectra · tolerance ±{tol} Da</span>"
-        ]
-        lines.append(
-            f"<br><b style='color:#00c850'>Common peaks: {len(common_mzs)}</b>"
-            f"  <span style='color:gray;font-size:11px'>"
-            f"(present in all spectra - green lines)</span>"
-        )
-        # List common m/z values if not too many
-        if 0 < len(common_mzs) <= 20:
-            mz_strs = ",  ".join(f"{m:.2f}" for m in sorted(common_mzs))
-            lines.append(f"<span style='font-size:11px;color:gray'>m/z: {mz_strs}</span>")
-        lines.append("<br><b>Unique peaks per spectrum:</b>")
-        for (_, color_hex, name), unique_mzs in zip(spectra, unique_lists):
-            lines.append(
-                f"&nbsp;&nbsp;<span style='color:{color_hex}'>■ {name}</span>: "
-                f"<b>{len(unique_mzs)}</b> unique"
-                + (f"  <span style='font-size:11px;color:gray'>"
-                   f"(m/z: {', '.join(f'{m:.2f}' for m in sorted(unique_mzs)[:8])}"
-                   f"{'…' if len(unique_mzs) > 8 else ''})</span>"
-                   if 0 < len(unique_mzs) <= 30 else "")
-            )
-        self._summary_lbl.setText("<br>".join(lines))
-        self._summary_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-
-    def _apply_opacities(self):
-        if not self._active:
-            return
-
-        # ── Update background opacity without a full render ──
-        bg_pct = self._bg_slider.value()
-        bg_alpha = int(bg_pct / 100 * 255)
-
-        # Dim the main curve directly
-        if _main_curve is not None:
-            c = pg.mkColor('#888888' if current_display == 'bright' else '#aaaaaa')
-            c.setAlpha(bg_alpha)
-            _main_curve.setPen(pg.mkPen(c, width=1))
-
-        # Dim overlay curves directly
-        for ov in overlay_list:
-            ov_id = id(ov)
-            if ov_id in _overlay_curves:
-                c = pg.mkColor(ov["color"])
-                c.setAlpha(bg_alpha)
-                _overlay_curves[ov_id].setPen(pg.mkPen(c, width=1))
-
-        # ── Re-apply line alphas ──
-        common_alpha = int(self._common_slider.value() / 100 * 255)
-        unique_alpha = int(self._unique_slider.value() / 100 * 255)
-        for line in self._lines:
-            pen = line.pen
-            c = pen.color()
-            is_common = (c.green() > 100 and c.red() < 80)
-            new_alpha = common_alpha if is_common else unique_alpha
-            c.setAlpha(new_alpha)
-            pen.setColor(c)
-            line.setPen(pen)
-
-    def closeEvent(self, event):
-        self._clear_lines()
-        global _comparison_win_ref
-        _comparison_win_ref = None
-        super().closeEvent(event)
+_comparison_win_ref = None  # window class in droplet/ui/windows/peak_comparison.py
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PEAK AREA MEASUREMENT WINDOW
-# ═════════════════════════════════════════════════════════════════════════════
-_area_win_ref = None
-
-class PeakAreaWindow(QtWidgets.QWidget):
-    """
-    Non-modal window combining:
-      1. Interactive range-click area measurement (the existing tool, via toggle)
-      2. Total spectrum area computation
-      3. Per-peak-list area ratios
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent, QtCore.Qt.WindowType.Window)
-        self.setWindowTitle("Peak Area Measurement")
-        self.resize(500, 520)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
-
-        root = QtWidgets.QVBoxLayout(self)
-        root.setSpacing(8)
-        root.setContentsMargins(10, 10, 10, 10)
-
-        # ── Section 1: Interactive range measurement ──────────────────
-        range_box = QtWidgets.QGroupBox("Interactive range measurement  [A]")
-        range_lay = QtWidgets.QVBoxLayout(range_box)
-        self._range_toggle = QtWidgets.QCheckBox(
-            "Activate click-to-measure mode (click twice on the plot to define a range)")
-        self._range_toggle.setChecked(area_mode_action.isChecked())
-        self._range_toggle.toggled.connect(lambda v: _area_mode_set(v))
-        area_mode_action.toggled.connect(
-            lambda v: self._range_toggle.blockSignals(True) or
-                      self._range_toggle.setChecked(v) or
-                      self._range_toggle.blockSignals(False))
-        range_lay.addWidget(self._range_toggle)
-        root.addWidget(range_box)
-
-        # ── Section 2: Spectrum selector + total area ─────────────────
-        total_box = QtWidgets.QGroupBox("Total spectrum area")
-        total_lay = QtWidgets.QGridLayout(total_box)
-
-        total_lay.addWidget(QtWidgets.QLabel("Spectrum:"), 0, 0)
-        self._spec_combo = QtWidgets.QComboBox()
-        total_lay.addWidget(self._spec_combo, 0, 1)
-
-        self._total_btn = QtWidgets.QPushButton("Compute total area")
-        self._total_btn.clicked.connect(self._compute_total)
-        total_lay.addWidget(self._total_btn, 1, 0, 1, 2)
-
-        self._total_lbl = QtWidgets.QLabel("-")
-        self._total_lbl.setWordWrap(True)
-        self._total_lbl.setStyleSheet("font-size: 12px; color: gray;")
-        total_lay.addWidget(self._total_lbl, 2, 0, 1, 2)
-        root.addWidget(total_box)
-
-        # ── Section 3: Peak-list area ratios ─────────────────────────
-        ratio_box = QtWidgets.QGroupBox("Peak-list area ratios")
-        ratio_lay = QtWidgets.QVBoxLayout(ratio_box)
-        ratio_lay.addWidget(QtWidgets.QLabel(
-            "Toggle peak lists below, then click 'Compute ratios'.\n"
-            "Areas are summed over highlighted peaks for each toggled list."))
-
-        self._pl_scroll = QtWidgets.QScrollArea()
-        self._pl_scroll.setWidgetResizable(True)
-        self._pl_container = QtWidgets.QWidget()
-        self._pl_layout = QtWidgets.QVBoxLayout(self._pl_container)
-        self._pl_layout.setContentsMargins(0, 0, 0, 0)
-        self._pl_layout.setSpacing(2)
-        self._pl_scroll.setWidget(self._pl_container)
-        self._pl_scroll.setMaximumHeight(160)
-        ratio_lay.addWidget(self._pl_scroll)
-
-        self._ratio_btn = QtWidgets.QPushButton("Compute ratios")
-        self._ratio_btn.clicked.connect(self._compute_ratios)
-        ratio_lay.addWidget(self._ratio_btn)
-
-        self._ratio_lbl = QtWidgets.QLabel("-")
-        self._ratio_lbl.setWordWrap(True)
-        self._ratio_lbl.setStyleSheet("font-size: 12px; color: gray;")
-        ratio_lay.addWidget(self._ratio_lbl)
-        root.addWidget(ratio_box)
-
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        root.addWidget(close_btn)
-
-        self._refresh_spec_combo()
-        self._refresh_peak_list_rows()
-
-    def _refresh_spec_combo(self):
-        self._spec_combo.clear()
-        if df is not None:
-            self._spec_combo.addItem("Main spectrum", "main")
-        for i, ov in enumerate(overlay_list):
-            if ov["toggle"].isChecked() and ov["df"] is not None:
-                lbl = ov["toggle"].text() or f"Overlay {i+1}"
-                self._spec_combo.addItem(lbl, i)
-
-    def _get_selected_df(self):
-        key = self._spec_combo.currentData()
-        if key == "main":
-            return df
-        if isinstance(key, int) and 0 <= key < len(overlay_list):
-            return overlay_list[key]["df"]
-        return None
-
-    def _refresh_peak_list_rows(self):
-        # Clear existing
-        while self._pl_layout.count():
-            item = self._pl_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-        self._pl_chks = []
-        for row in custom_peak_rows:
-            lbl = row["label_input"].text().strip() or "Unnamed"
-            color = row["color"][0].name()
-            chk = QtWidgets.QCheckBox()
-            chk.setChecked(row["checkbox"].isChecked())
-            swatch = QtWidgets.QLabel()
-            swatch.setFixedSize(12, 12)
-            swatch.setStyleSheet(
-                f"background:{color}; border:1px solid gray; border-radius:2px;")
-            name_lbl = QtWidgets.QLabel(lbl)
-            row_w = QtWidgets.QWidget()
-            rl = QtWidgets.QHBoxLayout(row_w)
-            rl.setContentsMargins(2, 0, 2, 0); rl.setSpacing(4)
-            rl.addWidget(chk); rl.addWidget(swatch); rl.addWidget(name_lbl)
-            rl.addStretch()
-            self._pl_layout.addWidget(row_w)
-            self._pl_chks.append((chk, row))
-        self._pl_layout.addStretch()
-
-    def _compute_total(self):
-        self._refresh_spec_combo()
-        data = self._get_selected_df()
-        if data is None or len(data) == 0:
-            self._total_lbl.setText("No spectrum selected or loaded.")
-            return
-        mz_arr  = data['mz'].values
-        int_arr = data['intensity'].values
-        total   = float(np.trapz(int_arr, mz_arr))
-        mz_lo, mz_hi = float(mz_arr.min()), float(mz_arr.max())
-        self._total_lbl.setText(
-            f"Total area: <b>{total:.4e}</b><br>"
-            f"m/z range: {mz_lo:.2f} – {mz_hi:.2f}<br>"
-            f"({len(data)} data points)")
-        self._total_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-
-    def _compute_ratios(self):
-        data = self._get_selected_df()
-        if data is None or len(data) == 0:
-            self._ratio_lbl.setText("No spectrum selected or loaded.")
-            return
-        results = []
-        for chk, row in self._pl_chks:
-            if not chk.isChecked(): continue
-            peaks = parse_peaks_text(row["peaks_input"].text())
-            if not peaks: continue
-            label = row["label_input"].text().strip() or "Unnamed"
-            color = row["color"][0].name()
-            # Sum area under each highlighted peak (±tolerance window)
-            total_area = 0.0
-            for mz_nom in peaks:
-                tol = get_tolerance(mz_nom)
-                mask = (data['mz'] >= mz_nom - tol) & (data['mz'] <= mz_nom + tol)
-                sub = data[mask]
-                if len(sub) >= 2:
-                    total_area += float(np.trapz(sub['intensity'].values,
-                                                  sub['mz'].values))
-            results.append((label, color, total_area))
-
-        if not results:
-            self._ratio_lbl.setText("No peak lists selected.")
-            return
-
-        max_area = max(r[2] for r in results) or 1.0
-        lines = ["<b>Relative areas (normalized to largest):</b>"]
-        for label, color, area in results:
-            ratio = area / max_area
-            lines.append(
-                f"<span style='color:{color}'>■ {label}</span>: "
-                f"area = <b>{area:.4e}</b>  "
-                f"(ratio = <b>{ratio:.4f}</b>)")
-        # Also show pairwise ratios if exactly 2 lists
-        if len(results) == 2:
-            r0, r1 = results[0][2], results[1][2]
-            if r1 != 0:
-                lines.append(
-                    f"<br>{results[0][0]} / {results[1][0]} = "
-                    f"<b>{r0/r1:.4f}</b>")
-        self._ratio_lbl.setText("<br>".join(lines))
-        self._ratio_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
-
-    def showEvent(self, event):
-        """Refresh the peak list rows when the window becomes visible."""
-        super().showEvent(event)
-        self._refresh_peak_list_rows()
-        self._refresh_spec_combo()
-
-    def closeEvent(self, event):
-        global _area_win_ref
-        # Turn off area mode when window closes
-        if area_mode_action.isChecked():
-            _area_mode_set(False)
-        _area_win_ref = None
-        super().closeEvent(event)
-
+_area_win_ref = None  # window class in droplet/ui/windows/peak_area.py
 
 def _open_peak_area_window():
     global _area_win_ref
@@ -6093,14 +4979,134 @@ def _draw_envelope_lines(data_df):
                   symbolPen=pg.mkPen(color, width=1),
                   symbolBrush=pg.mkBrush(color))
 
+_stacked_sub_plots      = []
+_stacked_mouse_handlers = []
+_stacked_click_handlers = []
+_stacked_spectra_data   = []   # (data_df, mz_vals, int_vals) per sub-plot, for peak redraws
+_stacked_peak_items     = []   # peak overlay items per sub-plot, for peak-only redraws
 
-def _build_stacked_layout(spectra_list):
+def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items=False):
+    """
+    Draw peak highlights and labels onto a single stacked sub-plot.
+    Mirrors what render_plot does for the main plot, but targets sub_plot.
+    """
+    show_lbl    = peak_labels_toggle.isChecked()
+    show_masses = peak_masses_toggle.isChecked()
+    show_int    = show_integers_toggle.isChecked()
+    pk_alpha    = highlight_alpha()
+    MERGE_TOL   = 0.5
+    BASE_PT     = 9
+
+    theme_color = 'w' if current_display == 'dark' else 'k'
+    created_items = []
+
+    # Normalise intensity to [0,1] so positions match the sub-plot's Y axis
+    norm = normalise_cached(data_df, zero_floor=True)
+    norm_mz  = norm['mz'].values
+    norm_int = norm['intensity'].values
+
+    groups = []  # {mid_mz, peak_mz, peak_int, labels, colors}
+
+    for row in custom_peak_rows:
+        if not row["checkbox"].isChecked():
+            continue
+        peaks = parse_peaks_text(row["peaks_input"].text())
+        if not peaks:
+            continue
+        color_str = row["color"][0].name()
+        lbl = row["label_input"].text().strip() or "Custom peaks"
+
+        peaks_flat = []
+        for group in peaks:
+            if not isinstance(group, (list, tuple)):
+                group = [group]
+            peaks_flat.extend(group)
+
+        # Find the nearest m/z point in the normalised spectrum for each peak
+        # Find the nearest m/z point in the normalised spectrum for each peak
+        for peak_mz_target in peaks_flat:
+            idx = np.argmin(np.abs(norm_mz - peak_mz_target))
+            peak_mz  = float(norm_mz[idx])
+            peak_int = float(int_vals[idx])
+
+            # Draw a highlight bar on the sub-plot
+            geom_list = _get_highlight_geometry(data_df, [peak_mz_target])
+            for (mz_arr, int_arr, mz_min, mz_max, _pmz, _pint) in geom_list:
+                bg_color = pg.mkColor(theme_color)
+                hi_color = apply_alpha(color_str, pk_alpha)
+                bar_idx = np.searchsorted(mz_vals, mz_arr).clip(0, len(int_vals) - 1)
+                norm_arr = int_vals[bar_idx]
+                sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(bg_color, width=3))
+                sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(hi_color, width=3))
+            if return_items:
+                created_items.extend(sub_plot.listDataItems()[-2:])
+
+            # Merge nearby labels (same tolerance as the main plot)
+            merged = False
+            for g in groups:
+                if abs(g["peak_mz"] - peak_mz) <= MERGE_TOL:
+                    if lbl and lbl not in g["labels"]:
+                        g["labels"].append(lbl)
+                        g["colors"].append(color_str)
+                    if peak_int > g["peak_int"]:
+                        g["peak_mz"]  = peak_mz
+                        g["peak_int"] = peak_int
+                    merged = True
+                    break
+            if not merged:
+                groups.append({
+                    "peak_mz":  peak_mz,
+                    "peak_int": peak_int,
+                    "labels":   [lbl] if lbl else [],
+                    "colors":   [color_str],
+                })
+
+    # Draw one TextItem per group on this sub-plot
+    for g in groups:
+        texts = []
+        if show_lbl and g["labels"]:
+            if settings.value("label_stack_vertical", False, type=bool):
+                texts.extend(g["labels"])
+            else:
+                texts.append(", ".join(g["labels"]))
+        if show_masses:
+            mz_val = g["peak_mz"]
+            texts.append(str(int(round(mz_val))) if show_int else f"{mz_val:.2f}")
+        if not texts:
+            continue
+
+        label_color = g["colors"][0] if g["colors"] else theme_color
+        font = QtGui.QFont()
+        font.setPointSize(BASE_PT)
+
+        text_item = pg.TextItem(
+            text="\n".join(texts),
+            anchor=(0, 0.5),
+            angle=60,
+            color=label_color,
+        )
+        text_item.setFont(font)
+        # Y position: slightly above the normalised peak intensity
+        y_pos = g["peak_int"] + 0.05
+        text_item.setPos(g["peak_mz"], y_pos)
+        sub_plot.addItem(text_item)
+        if return_items:
+            created_items.append(text_item)
+
+    if return_items:
+        return created_items
+
+def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None):
     """
     Hide the main plot, then add N sub-plots starting at row 1.
     Row 0 is collapsed to zero height so no empty axes appear at the top.
     spectra_list: list of (data_df, display_name, pen_color)
+    restore_xrange: optional (xmin, xmax) to restore after build instead of auto-ranging.
+    restore_yrange: optional (ymin, ymax) to restore after build instead of auto-ranging.
     """
-    global _stacked_sub_plots
+    global _stacked_sub_plots, _stacked_spectra_data, _stacked_peak_items
+    _stacked_peak_items = []
+    _stacked_spectra_data = []   # list of (data_df, mz_vals, int_vals) per sub-plot
     _destroy_stacked_layout()
     app.processEvents()
 
@@ -6110,6 +5116,7 @@ def _build_stacked_layout(spectra_list):
 
     theme_color = 'k' if current_display == 'bright' else 'w'
     link_x = None
+    link_y = None
 
     # Hide the main plot item entirely, then collapse its row to 0 px.
     # Both steps are needed: hiding suppresses painting; collapsing the row
@@ -6149,11 +5156,37 @@ def _build_stacked_layout(spectra_list):
 
         def _make_view_all():
             def _do():
-                if _stacked_sub_plots:
+                if not _stacked_sub_plots:
+                    return
+                lo = _view_mz_lower_spin.value()
+                all_mz = []; all_int = []
+                for sp in _stacked_sub_plots:
+                    for curve in sp.listDataItems():
+                        xd, yd = curve.getData()
+                        if xd is None or len(xd) == 0:
+                            continue
+                        mask = xd >= lo
+                        if mask.any():
+                            all_mz.append(xd[mask])
+                            all_int.append(yd[mask])
+                if not all_mz:
+                    # Fallback: no data above threshold, just auto-range
                     m = _stacked_sub_plots[0]
                     m.vb.enableAutoRange(axis=m.vb.XAxis, enable=True)
                     m.vb.updateAutoRange()
                     m.vb.enableAutoRange(axis=m.vb.XAxis, enable=False)
+                    return
+                mz_all = np.concatenate(all_mz)
+                x_min, x_max = float(mz_all.min()), float(mz_all.max())
+                pad = (x_max - x_min) * 0.02
+                _stacked_sub_plots[0].vb.setXRange(x_min - pad, x_max + pad, padding=0)
+                if not _stacked_log_y and all_int:
+                    int_all = np.concatenate(all_int)
+                    y_max = float(int_all.max())
+                    pad_y = y_max * 0.05
+                    y_floor = 0.0 if _stacked_lock_y else float(int_all.min()) - pad_y
+                    for sp in _stacked_sub_plots:
+                        sp.vb.setYRange(y_floor, y_max + pad_y, padding=0)
             return _do
 
         view_all_act.triggered.connect(_make_view_all())
@@ -6195,24 +5228,62 @@ def _build_stacked_layout(spectra_list):
             _make_sub_mouse_handler(sub, sub_vline, sub_hline, sub_label, name))
         sub.scene().sigMouseMoved.connect(_stacked_mouse_handlers[-1])
 
+        def _stacked_click_handler(event):
+            if not pick_mode_action.isChecked(): return
+            if event.button() != QtCore.Qt.MouseButton.LeftButton: return
+            pos = event.scenePos()
+            for i, sub in enumerate(_stacked_sub_plots):
+                if not sub.sceneBoundingRect().contains(pos): continue
+                mp = sub.vb.mapSceneToView(pos)
+                clicked_mz = mp.x()
+                data_df = _stacked_spectra_data[i][0] if i < len(_stacked_spectra_data) else None
+                row_idx = pick_row_combo.currentIndex()
+                if row_idx < 0 or row_idx >= len(custom_peak_rows): return
+                row = custom_peak_rows[row_idx]
+                double = event.double() if hasattr(event, 'double') else False
+                if double:
+                    result = _find_nearest_peak_in_row(row, clicked_mz)
+                    if result is None: return
+                    push_peak_history()
+                    peaks = parse_peaks_text(row["peaks_input"].text())
+                    peaks.pop(result[0])
+                    row["peaks_input"].setText(", ".join(f"{p:.4f}" for p in peaks))
+                    _clear_highlight_cache()
+                else:
+                    snap_mz = clicked_mz
+                    if data_df is not None and len(data_df) > 0:
+                        idx = (data_df['mz'] - clicked_mz).abs().idxmin()
+                        snap_mz = round(float(data_df.loc[idx, 'mz']), 4)
+                    push_peak_history()
+                    current = row["peaks_input"].text().strip()
+                    new_val = f"{snap_mz:.4f}"
+                    row["peaks_input"].setText(current + f", {new_val}" if current else new_val)
+                    _clear_highlight_cache()
+                return  # only handle the first matching sub-plot
+
         norm = normalise_cached(data_df, zero_floor=True)
+        mz_vals = norm['mz'].values
         int_vals = norm['intensity'].values
 
+        # Re-normalise so the threshold-filtered region fills 0→1.
+        # This prevents below-threshold peaks from dominating the Y scale.
+        lo_thresh = _view_mz_lower_spin.value()
+        above_mask = mz_vals >= lo_thresh
+        if above_mask.any():
+            above_max = int_vals[above_mask].max()
+            if above_max > 0:
+                int_vals = int_vals / above_max
+        int_vals = np.clip(int_vals, 0, None)
+
         if _sigma3_clip:
-            # Use the user-controlled sigma slider, same as the normal plot
             sigma3_floor = _estimate_noise_floor(int_vals, n_sigma=_sigma3_n_sigma)
-            sigma3_floor = max(sigma3_floor, 1e-6)  # must be positive for log safety
+            sigma3_floor = max(sigma3_floor, 1e-6)
             int_vals = np.clip(int_vals, sigma3_floor, None)
         elif _stacked_log_y:
-            # Log Y needs a small positive floor to avoid log(0),
-            # but we don't clip based on noise - use a minimal fixed safety floor only
             sigma3_floor = 1e-6
             int_vals = np.clip(int_vals, sigma3_floor, None)
         else:
-            int_vals = np.clip(int_vals, 0, None)
             sigma3_floor = None
-
-        mz_vals = norm['mz'].values
 
         sub.plot(mz_vals, int_vals, pen=pg.mkPen(color, width=1), name=name)
 
@@ -6221,7 +5292,7 @@ def _build_stacked_layout(spectra_list):
         else:
             sub.setXLink(link_x)
 
-        sub.vb.setMouseEnabled(y=False)
+        sub.vb.setMouseEnabled(y=True)
         # Determine if this row should be mirrored (Y inverted)
         _mirror_this = False
         if _stacked_mirror:
@@ -6231,56 +5302,132 @@ def _build_stacked_layout(spectra_list):
             log_floor = np.log10(sigma3_floor) if sigma3_floor else -6
             if _mirror_this:
                 sub.vb.setYRange(0, log_floor, padding=0)
-                sub.vb.setLimits(yMax=0.1, yMin=log_floor - 0.5)
                 sub.getAxis('left').setStyle(tickTextOffset=2)
                 sub.vb.invertY(True)
             else:
                 sub.vb.setYRange(log_floor, 0, padding=0)
-                sub.vb.setLimits(yMin=log_floor - 0.5, yMax=0.1)
                 sub.vb.invertY(False)
         else:
             if _mirror_this:
-                sub.vb.setYRange(1.05, 0, padding=0)
-                sub.vb.setLimits(yMax=1.15, yMin=0)
+                sub.vb.setYRange(0, 1.05, padding=0)
                 sub.vb.invertY(True)
             else:
                 sub.vb.setYRange(0, 1.05, padding=0)
-                sub.vb.setLimits(yMin=0, yMax=1.15)
                 sub.vb.invertY(False)
+
+        if link_y is None:
+            link_y = sub
+        else:
+            sub.setYLink(link_y)
+        sub.vb.sigRangeChanged.connect(_enforce_stacked_y)
         # Make all rows the same pixel height by setting a fixed row stretch
         plot_widget.ci.layout.setRowStretchFactor(i + 1, 1)
 
+        # Store data for peak-only redraws (so we don't need to re-normalise)
+        _stacked_spectra_data.append((data_df, mz_vals, int_vals))
+
+        # ── Peak highlights and labels for this sub-plot ────────────
+        items = _draw_stacked_peak_labels(sub, data_df, mz_vals, int_vals,
+                                          return_items=True)
+        _stacked_peak_items.append(items or [])
+
         _stacked_sub_plots.append(sub)
-    # Enforce equal height for all rows in the grid
-    # Do NOT set a pixel maximum - let the stretch factors share the space equally.
+
+    plot.scene().sigMouseClicked.connect(_stacked_click_handler)
+    _stacked_click_handlers.append(_stacked_click_handler)
+
+    _apply_stacked_y()
+
+
+    # Give every sub-plot row an equal stretch factor and a small minimum,
+    # but NO maximum — that lets Qt distribute available height freely on resize.
     for i in range(n):
         plot_widget.ci.layout.setRowMinimumHeight(i + 1, 40)
-        plot_widget.ci.layout.setRowMaximumHeight(i + 1, 16777215)  # unconstrained
-    # Force layout to fill the full widget area
+        plot_widget.ci.layout.setRowMaximumHeight(i + 1, 16777215)
+        plot_widget.ci.layout.setRowStretchFactor(i + 1, 1)
     plot_widget.ci.layout.activate()
     app.processEvents()
 
+    # Wire a resize handler that re-equalises row heights whenever the widget
+    # changes size. We store it so _destroy_stacked_layout can disconnect it.
+    def _on_stacked_resize(event):
+        if not _stacked_sub_plots:
+            return
+        total_h = plot_widget.height()
+        rh = max(40, total_h // len(_stacked_sub_plots))
+        layout = plot_widget.ci.layout
+        for idx in range(len(_stacked_sub_plots)):
+            layout.setRowMinimumHeight(idx + 1, rh)
+            layout.setRowMaximumHeight(idx + 1, rh)
+        # Do NOT call layout.activate() here — it resets column widths and
+        # causes plots to collapse to a fraction of the horizontal space.
+        # Qt's geometry pass triggered by resizeEvent handles the reflow correctly.
+        plot_widget.ci.layout.invalidate()
+
+    plot_widget._stacked_resize_handler = _on_stacked_resize
+    _orig_resize = getattr(plot_widget, '_orig_resize_event', plot_widget.resizeEvent)
+    plot_widget._orig_resize_event = _orig_resize
+    def _patched_resize(event):
+        _orig_resize(event)
+        _on_stacked_resize(event)
+    plot_widget.resizeEvent = _patched_resize
+
     def _nudge_stacked():
+        # Capture the original resize event into a local variable now, before
+        # we unhook anything. _patched_resize_local will close over this local
+        # so it never needs to look it up on plot_widget again (where it may
+        # already have been removed).
+        _captured_orig = getattr(plot_widget, '_orig_resize_event', None)
+
+        # Temporarily unhook the patched resize so the nudge resizes don't
+        # trigger layout.activate() and wipe the zoom we're about to restore.
+        if _captured_orig is not None:
+            plot_widget.resizeEvent = _captured_orig
+
         sz = plot_widget.size()
         plot_widget.resize(sz.width() + 1, sz.height())
         app.processEvents()
         plot_widget.resize(sz.width() - 1, sz.height())
         plot_widget.updateGeometry()
-        # Auto-range X on the master plot - all linked sub-plots follow.
-        # Must happen after the nudge so the widget has its final geometry.
+
+        # Re-hook the patched resize now that the nudge is done.
+        def _patched_resize_local(event):
+            if _captured_orig is not None:
+                _captured_orig(event)
+            if hasattr(plot_widget, '_stacked_resize_handler'):
+                plot_widget._stacked_resize_handler(event)
+        plot_widget.resizeEvent = _patched_resize_local
+
         if _stacked_sub_plots:
             master = _stacked_sub_plots[0]
-            master.vb.enableAutoRange(axis=master.vb.XAxis, enable=True)
-            master.vb.updateAutoRange()
-            master.vb.enableAutoRange(axis=master.vb.XAxis, enable=False)
+            if restore_xrange is not None:
+                master.vb.setXRange(restore_xrange[0], restore_xrange[1], padding=0)
+            else:
+                master.vb.enableAutoRange(axis=master.vb.XAxis, enable=True)
+                master.vb.updateAutoRange()
+                master.vb.enableAutoRange(axis=master.vb.XAxis, enable=False)
+            if restore_yrange is not None:
+                master.vb.setYRange(restore_yrange[0], restore_yrange[1], padding=0)
 
+    _apply_stacked_y()
     QtCore.QTimer.singleShot(100, _nudge_stacked)
 
 
 def _destroy_stacked_layout():
     """Remove all stacked sub-plots and reset grid layout constraints."""
-    global _stacked_sub_plots, _stacked_mouse_handlers
+    global _stacked_sub_plots, _stacked_mouse_handlers, _stacked_click_handlers
     _stacked_mouse_handlers.clear()
+    for handler in _stacked_click_handlers:
+        try:
+            plot.scene().sigMouseClicked.disconnect(handler)
+        except Exception:
+            pass
+    _stacked_click_handlers.clear()
+    try:
+        plot.scene().sigMouseClicked.disconnect(plot_clicked)
+    except Exception:
+        pass
+    plot.scene().sigMouseClicked.connect(plot_clicked)
     n = len(_stacked_sub_plots)
     for sub in _stacked_sub_plots:
         try:
@@ -6307,9 +5454,14 @@ def _destroy_stacked_layout():
     except Exception:
         pass
 
+    # Restore the original resize handler so normal mode is unaffected.
+    if hasattr(plot_widget, '_orig_resize_event'):
+        plot_widget.resizeEvent = plot_widget._orig_resize_event
+        del plot_widget._orig_resize_event
+    if hasattr(plot_widget, '_stacked_resize_handler'):
+        del plot_widget._stacked_resize_handler
+
     # Make the main plot visible and force a full geometry refresh.
-    # Two-step: activate layout immediately, then nudge size after event loop
-    # settles so pyqtgraph repaints the full plot area.
     plot.setVisible(True)
     plot_widget.ci.layout.activate()
     app.processEvents()
@@ -6352,7 +5504,7 @@ def _do_render_plot():
             plot.addItem(item)
         except Exception:
             pass
-            
+
     for item in _cluster_scatter_items:
         try:
             plot.addItem(item)
@@ -6382,17 +5534,27 @@ def _do_render_plot():
     #  STACKED MODE  - separate sub-plots, linear Y per row
     # ══════════════════════════════════════════════════════════════
     if _stacked_mode:
-        # Hide the main single plot so only the sub-plots are visible
         plot.setVisible(False)
 
-        spectra_info = []   # list of (data_df, short_label, pen_color)
+        # Save the current X and Y zoom so we can restore them after the rebuild.
+        # Only save if sub-plots already exist (i.e. this is a re-render, not
+        # the first build) and the user has actually zoomed somewhere.
+        _saved_stacked_xrange = None
+        _saved_stacked_yrange = None
+        if _stacked_sub_plots:
+            try:
+                _saved_stacked_xrange = _stacked_sub_plots[0].vb.viewRange()[0]
+                _saved_stacked_yrange = _stacked_sub_plots[0].vb.viewRange()[1]
+            except Exception:
+                pass
+
+        spectra_info = []
         main_color = _main_spectrum_color[0].name()
         if main_toggle.isChecked() and df is not None:
             spectra_info.append((df, "Main file", main_color))
         ov_index = 1
         for ov_data in overlay_list:
             if ov_data["toggle"].isChecked() and ov_data["df"] is not None:
-                # Use the user-visible toggle label (e.g. "Overlay 1", "Baseline (airPLS)")
                 short_name = ov_data["toggle"].text() or f"Overlay {ov_index}"
                 spectra_info.append((ov_data["df"], short_name, ov_data["color"]))
                 ov_index += 1
@@ -6402,8 +5564,8 @@ def _do_render_plot():
             plot.setVisible(True)
             return
 
-        _build_stacked_layout(spectra_info)
-        return   # ← skip the normal render path
+        _build_stacked_layout(spectra_info, restore_xrange=_saved_stacked_xrange, restore_yrange=_saved_stacked_yrange)
+        return
     # ══════════════════════════════════════════════════════════════
 
     # Normal (non-stacked) mode: make sure stacked sub-plots are gone
@@ -6798,14 +5960,43 @@ def restore_session_state():
 # ─────────────────────────────────────────────
 #  Project save / open  (.drp)
 # ─────────────────────────────────────────────
+_current_project_path = [None]   # mutable container for the active project path
+
+def _show_toast(message, duration_ms=2500):
+    """Briefly show a non-modal status message in the main window status bar."""
+    main_win.statusBar().showMessage(message, duration_ms)
+
+def _write_project(path):
+    """Core project serialization — path must already be validated."""
+    if not path.lower().endswith(".drp"):
+        path += ".drp"
+    _current_project_path[0] = path
+    settings.setValue("last_project_path", path)
+
 def save_project():
+    """Save to the current project path; if none, prompt for a path."""
+    if _current_project_path[0] and os.path.isfile(_current_project_path[0]):
+        path = _current_project_path[0]
+    else:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            main_win, "Save Project", _get_dialog_dir("project"), "Droplet Project (*.drp)")
+        if path: _set_dialog_dir("project", path)
+        if not path:
+            return
+        if not path.lower().endswith(".drp"):
+            path += ".drp"
+        _current_project_path[0] = path
+
+def save_project_as():
+    """Always prompt for a new path."""
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
-        main_win, "Save Project", _get_dialog_dir("project"), "Droplet Project (*.drp)")
+        main_win, "Save Project As", _get_dialog_dir("project"), "Droplet Project (*.drp)")
     if path: _set_dialog_dir("project", path)
     if not path:
         return
     if not path.lower().endswith(".drp"):
         path += ".drp"
+    _current_project_path[0] = path
 
     project = {}
 
@@ -7144,6 +6335,46 @@ def push_peak_history():
     _update_undo_redo_buttons()
 
 
+# Per-sub-plot peak item tracking for stacked mode peak-only redraws
+_stacked_peak_items = []   # list of lists: one inner list of items per sub-plot
+
+def _redraw_stacked_peaks_only():
+    """
+    In stacked mode: remove only the peak highlight/label items from each
+    sub-plot and redraw them, without touching the spectrum curves or
+    destroying/recreating any ViewBox. This preserves the current zoom.
+    """
+    global _stacked_peak_items
+    # Remove previously drawn peak items from each sub-plot
+    for sub_idx, items in enumerate(_stacked_peak_items):
+        if sub_idx >= len(_stacked_sub_plots):
+            break
+        sub = _stacked_sub_plots[sub_idx]
+        for item in items:
+            try:
+                sub.removeItem(item)
+            except Exception:
+                pass
+    _stacked_peak_items = []
+
+    # Redraw peaks on each sub-plot, collecting the new items
+    for sub_idx, sub in enumerate(_stacked_sub_plots):
+        items_this_sub = _draw_stacked_peak_labels(sub,
+            _stacked_spectra_data[sub_idx][0],
+            _stacked_spectra_data[sub_idx][1],
+            _stacked_spectra_data[sub_idx][2],
+            return_items=True)
+        _stacked_peak_items.append(items_this_sub or [])
+
+def _render_peaks_or_full():
+    """Route peak row changes: peak-only redraw in stacked mode, full render otherwise."""
+    if _stacked_mode and _stacked_sub_plots:
+        _redraw_stacked_peaks_only()
+    else:
+        render_plot()
+
+
+
 def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", range_values=None):
     global next_color_index
     if color is None:
@@ -7179,7 +6410,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     mode_btn.setFixedSize(22, 22)
     mode_btn.setToolTip("Switch between manual entry and range (start:step:end)")
     mode_btn.setCheckable(True)
-    
+
     # ── Manual input ──
     peaks_input = QtWidgets.QLineEdit()
     peaks_input.setPlaceholderText("Peak m/z values (comma-separated)…")
@@ -7187,23 +6418,23 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     peaks_input.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
     peaks_input.setText(peaks_text)
     peaks_input.setCursorPosition(0)
-    
+
     # ── Range input ──
     range_widget = QtWidgets.QWidget()
     range_layout = QtWidgets.QHBoxLayout(range_widget)
     range_layout.setContentsMargins(0, 0, 0, 0)
     range_layout.setSpacing(2)
-    
+
     range_start = QtWidgets.QDoubleSpinBox()
     range_start.setRange(0.0, 100000.0); range_start.setDecimals(0)
     range_start.setSingleStep(1.0); range_start.setMinimumWidth(50)
     range_start.setToolTip("Start m/z")
-    
+
     range_step = QtWidgets.QDoubleSpinBox()
     range_step.setRange(1.0, 10000.0); range_step.setDecimals(0)
     range_step.setSingleStep(1.0); range_step.setMinimumWidth(50)
     range_step.setValue(1.0); range_step.setToolTip("Step (interval)")
-    
+
     range_end = QtWidgets.QDoubleSpinBox()
     range_end.setRange(0.0, 100000.0); range_end.setDecimals(0)
     range_end.setSingleStep(1.0); range_end.setMinimumWidth(50)
@@ -7212,7 +6443,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     for sb in (range_start, range_step, range_end):
         sb.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                          QtWidgets.QSizePolicy.Policy.Fixed)
-    
+
     range_layout.addWidget(QtWidgets.QLabel(" from"))
     range_layout.addWidget(range_start)
     range_layout.addWidget(QtWidgets.QLabel(" to"))
@@ -7221,7 +6452,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     range_layout.addWidget(range_step)
     range_widget.setVisible(False)
     range_layout.addStretch()
-    
+
     def _range_to_peaks_text():
         start = range_start.value()
         step  = range_step.value()
@@ -7232,14 +6463,14 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         def _fmt(v):
             return str(int(round(v))) if v == round(v) else f"{v:.4f}"
         return ", ".join(_fmt(v) for v in values)
-    
+
     def _on_range_changed():
         peaks_input.blockSignals(True)
         peaks_input.setText(_range_to_peaks_text())
         peaks_input.blockSignals(False)
         _clear_highlight_cache()
         render_plot()
-    
+
     def _on_mode_toggled(checked):
         peaks_input.setVisible(not checked)
         range_widget.setVisible(checked)
@@ -7265,7 +6496,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         else:
             _clear_highlight_cache()
             render_plot()
-            
+
     mode_btn.toggled.connect(_on_mode_toggled)
     range_start.valueChanged.connect(lambda _: _on_range_changed())
     range_step.valueChanged.connect(lambda _: _on_range_changed())
@@ -7372,12 +6603,12 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         update_pick_row_combo(); render_plot()
 
     remove_btn.clicked.connect(on_remove)
-    checkbox.stateChanged.connect(lambda _: render_plot())
+    checkbox.stateChanged.connect(lambda _: _render_peaks_or_full())
     envelope_btn.toggled.connect(lambda _: render_plot())
     peaks_input.editingFinished.connect(push_peak_history)
-    peaks_input.textChanged.connect(lambda _: render_plot())
+    peaks_input.textChanged.connect(lambda _: _render_peaks_or_full())
     label_input.textChanged.connect(lambda _: update_pick_row_combo())
-    label_input.textChanged.connect(lambda _: render_plot())
+    label_input.textChanged.connect(lambda _: _render_peaks_or_full())
     custom_peak_rows.append(row_data)
     peaks_rows_layout_add(row_widget)
     return row_data
@@ -7505,7 +6736,13 @@ pw_toolbar.addWidget(undo_btn); pw_toolbar.addWidget(redo_btn)
 pw_toolbar.addSpacing(8); pw_toolbar.addWidget(add_btn)
 pw_toolbar.addSpacing(6)
 pw_toolbar.addWidget(pw_select_all_btn); pw_toolbar.addWidget(pw_select_none_btn)
-pw_toolbar.addStretch(); pw_toolbar.addWidget(peaks_help_btn)
+pw_export_csv_btn = QtWidgets.QPushButton("Export CSV")
+pw_export_csv_btn.setFixedHeight(24)
+pw_export_csv_btn.setToolTip("Export highlighted peak data as CSV")
+pw_export_csv_btn.clicked.connect(lambda: export_peaks_csv())
+pw_toolbar.addStretch()
+pw_toolbar.addWidget(pw_export_csv_btn)
+pw_toolbar.addWidget(peaks_help_btn)
 peaks_layout.addLayout(pw_toolbar)
 
 # "Pick into:" row inside peaks window - mirrors the one in main tools bar
@@ -7636,7 +6873,7 @@ def auto_load_peaks():
 # ─────────────────────────────────────────────
 def _update_peaks_win_title(path=None):
     if path:
-        peaks_win.setWindowTitle(f"Peaks  -  {os.path.basename(path)}")
+        peaks_win.setWindowTitle(f"Peaks  —  {os.path.basename(path)}")
     else:
         peaks_win.setWindowTitle("Peaks")
 
@@ -7710,11 +6947,14 @@ auto_load_peaks()
 #  Peak undo/redo  (text edits only)
 # ─────────────────────────────────────────────
 def _snapshot_peaks():
-    return [{"checked": r["checkbox"].isChecked(),
-             "color":   r["color"][0].name(),
-             "peaks":   r["peaks_input"].text(),
-             "label":   r["label_input"].text()}
-            for r in custom_peak_rows]
+    return {
+        "rows": [{"checked": r["checkbox"].isChecked(),
+                  "color":   r["color"][0].name(),
+                  "peaks":   r["peaks_input"].text(),
+                  "label":   r["label_input"].text()}
+                 for r in custom_peak_rows],
+        "pick_row": pick_row_combo.currentIndex(),
+    }
 
 def _update_undo_redo_buttons():
     undo_btn.setEnabled(bool(_peak_history))
@@ -7723,7 +6963,8 @@ def _update_undo_redo_buttons():
 def _restore_snapshot(snapshot):
     global _history_locked
     _history_locked = True
-    for i, item in enumerate(snapshot):
+    rows = snapshot["rows"] if isinstance(snapshot, dict) else snapshot
+    for i, item in enumerate(rows):
         if i >= len(custom_peak_rows): break
         row = custom_peak_rows[i]
         row["checkbox"].setChecked(item.get("checked", True))
@@ -7740,7 +6981,10 @@ def _restore_snapshot(snapshot):
                 child.setStyleSheet(f"background-color: {c.name()}; border: 1px solid gray;"); break
     _history_locked = False
     _clear_highlight_cache()
-    update_pick_row_combo(); render_plot()
+    update_pick_row_combo()
+    if isinstance(snapshot, dict) and "pick_row" in snapshot:
+        pick_row_combo.setCurrentIndex(snapshot["pick_row"])
+    render_plot()
 
 def undo_peaks():
     if not _peak_history: return
@@ -8038,6 +7282,72 @@ def on_lock_axes_toggled(checked):
 
 lock_axes_action.toggled.connect(on_lock_axes_toggled)
 
+_stacked_y_guard = False
+
+def _stacked_y_target():
+    """Return the target (ymin, ymax) for the active stacked Y option, or None."""
+    if _stacked_log_y:
+        return None
+    if _stacked_fit_y:
+        if not _stacked_spectra_data:
+            return None
+        lo = _view_mz_lower_spin.value()
+        data_max = max(
+            float(iv[mz >= lo].max()) if (mz >= lo).any() else 0.0
+            for _, mz, iv in _stacked_spectra_data
+        )
+        return (0.0, max(data_max, 1e-6) * 1.05)
+    if _stacked_lock_y:
+        return (0.0, _stacked_lock_ymax)
+    return None
+
+def _enforce_stacked_y(vb, ranges):
+    """Called on every range change in a stacked sub-plot."""
+    global _stacked_y_guard
+    if _stacked_y_guard:
+        return
+    target = _stacked_y_target()
+    if target is None:
+        return
+    ymin, ymax = ranges[1]
+    t_min, t_max = target
+    if abs(ymin - t_min) > 1e-6 or abs(ymax - t_max) > 1e-4:
+        _stacked_y_guard = True
+        vb.setYRange(t_min, t_max, padding=0)
+        _stacked_y_guard = False
+
+def _apply_stacked_y():
+    """Immediately apply the current Y constraint to all stacked sub-plots."""
+    target = _stacked_y_target()
+    if target is None:
+        return
+    for sub in _stacked_sub_plots:
+        sub.vb.setYRange(target[0], target[1], padding=0)
+
+def _on_stacked_fit_y(v):
+    global _stacked_fit_y
+    _stacked_fit_y = v
+    settings.setValue("stacked_fit_y", v)
+    if v and _stacked_lock_y:
+        stacked_lock_y_action.setChecked(False)
+    _apply_stacked_y()
+
+def _on_stacked_lock_y(v):
+    global _stacked_lock_y
+    _stacked_lock_y = v
+    settings.setValue("stacked_lock_y", v)
+    _stacked_lock_ymax_spin.setEnabled(v)
+    if v and _stacked_fit_y:
+        stacked_fit_y_action.setChecked(False)
+    _apply_stacked_y()
+
+stacked_fit_y_action.toggled.connect(_on_stacked_fit_y)
+stacked_lock_y_action.toggled.connect(_on_stacked_lock_y)
+_stacked_lock_ymax_spin.valueChanged.connect(lambda v: (
+    globals().update({"_stacked_lock_ymax": v}),
+    settings.setValue("stacked_lock_ymax", v),
+    _apply_stacked_y()))
+
 # ─────────────────────────────────────────────
 #  Ctrl+scroll / Ctrl+arrow → nudge overlay opacity
 # ─────────────────────────────────────────────
@@ -8059,6 +7369,12 @@ class CtrlScrollFilter(QtCore.QObject):
                 go_next = event.angleDelta().y() < 0
             else:
                 go_next = event.key() == QtCore.Qt.Key.Key_Down
+
+            if _stacked_lock_y:
+                step = _stacked_lock_ymax_spin.singleStep()
+                _stacked_lock_ymax_spin.setValue(
+                    _stacked_lock_ymax_spin.value() + (-step if go_next else step))
+                return True
 
             _cycle_overlay(go_next)
             return True
@@ -8313,7 +7629,18 @@ def cleanup():
     save_session_state()
 
 app.aboutToQuit.connect(cleanup)
-save_project_action.triggered.connect(save_project)
+def _save_project_and_toast():
+    save_project()
+    if _current_project_path[0]:
+        _show_toast(f"Project saved: {os.path.basename(_current_project_path[0])}")
+
+def _save_project_as_and_toast():
+    save_project_as()
+    if _current_project_path[0]:
+        _show_toast(f"Project saved as: {os.path.basename(_current_project_path[0])}")
+
+save_project_action.triggered.connect(_save_project_and_toast)
+save_project_as_action.triggered.connect(_save_project_as_and_toast)
 open_project_action.triggered.connect(open_project)
 
 
@@ -8713,7 +8040,9 @@ class PlottingToolWindow(QtWidgets.QWidget):
         s.setValue("pt/label_fontsize", self.label_fontsize_spin.value())
         s.setValue("pt/label_angle",    self.label_angle_spin.value())
         s.setValue("pt/label_color",         self._label_color)
-        s.setValue("pt/label_use_row_color", self.label_use_row_color_cb.isChecked())
+        s.setValue("pt/label_use_row_color",  self.label_use_row_color_cb.isChecked())
+        s.setValue("pt/label_mass_black",     self.label_mass_black_cb.isChecked())
+        s.setValue("pt/label_use_black_masses", self.label_use_black_masses_cb.isChecked())
         s.setValue("pt/auto_label",     self.auto_label_cb.isChecked())
         s.setValue("pt/label_thr_mode", self.label_thr_mode_combo.currentText())
         s.setValue("pt/label_thr",      self.label_threshold_spin.value())
@@ -8802,6 +8131,12 @@ class PlottingToolWindow(QtWidgets.QWidget):
         if hasattr(self, "label_use_row_color_cb"):
             self.label_use_row_color_cb.setChecked(
                 s.value("pt/label_use_row_color", True, type=bool))
+        if hasattr(self, "label_mass_black_cb"):
+            self.label_mass_black_cb.setChecked(
+                s.value("pt/label_mass_black", False, type=bool))
+        if hasattr(self, "label_use_black_masses_cb"):
+            self.label_use_black_masses_cb.setChecked(
+                s.value("pt/label_use_black_masses", False, type=bool))
         self.auto_label_cb.setChecked(   s.value("pt/auto_label",      False, type=bool))
         m_idx = self.label_thr_mode_combo.findText(s.value("pt/label_thr_mode", "% of max intensity"))
         if m_idx >= 0: self.label_thr_mode_combo.setCurrentIndex(m_idx)
@@ -9814,6 +9149,22 @@ class PlottingToolWindow(QtWidgets.QWidget):
         self.label_use_row_color_cb.toggled.connect(self._draw)
         la_lay.addRow("", self.label_use_row_color_cb)
 
+        self.label_mass_black_cb = QtWidgets.QCheckBox("Use black for mass labels")
+        self.label_mass_black_cb.setChecked(False)
+        self.label_mass_black_cb.setToolTip(
+            "Force all peak-list m/z value labels to black,\n"
+            "regardless of the peak list color setting above.")
+        self.label_mass_black_cb.toggled.connect(self._draw)
+        la_lay.addRow("", self.label_mass_black_cb)
+
+        self.label_use_black_masses_cb = QtWidgets.QCheckBox("Use black for masses labels")
+        self.label_use_black_masses_cb.setChecked(False)
+        self.label_use_black_masses_cb.setToolTip(
+            "When checked, all m/z mass labels on peaks are drawn in black,\n"
+            "regardless of the peak list color setting above.")
+        self.label_use_black_masses_cb.toggled.connect(self._draw)
+        la_lay.addRow("", self.label_use_black_masses_cb)
+
         self.label_color_btn = QtWidgets.QPushButton()
         self._label_color = "#222222"
         self.label_color_btn.setFixedHeight(22)
@@ -10740,17 +10091,19 @@ class PlottingToolWindow(QtWidgets.QWidget):
         else:
             amp_ref = 1.0
 
-        _do_mirror = self.mirror_pairs_cb.isChecked()
+        _do_mirror  = self.mirror_pairs_cb.isChecked()
         _mirror_odd = self.mirror_odd_cb.isChecked()
         for i, sp in enumerate(self._spectra):
             d        = sp["df"]
             y        = _apply_sigma_clip(_normalise(d["intensity"]))
             offset   = i * offset_f * amp_ref
-            # Mirror: flip Y sign for alternating spectra
             if _do_mirror:
                 _flip_set = (0 if _mirror_odd else 1)
                 if i % 2 == _flip_set:
-                    y = -y
+                    # Flip so the baseline (floor) sits at the pair's offset,
+                    # not at 0.  y was in [0..1]; flipped it spans [-1..0],
+                    # then shift by +1 so the floor is at offset (not offset-1).
+                    y = -y + 1.0
             ax.plot(d["mz"], y + offset,
                     color=sp["color"],
                     linewidth=sp.get("linewidth", 0.5),
@@ -10971,7 +10324,11 @@ class PlottingToolWindow(QtWidgets.QWidget):
             use_row_color = self.label_use_row_color_cb.isChecked()
             MERGE_TOL  = 0.6  # Da
 
+            use_black_masses = self.label_use_black_masses_cb.isChecked()
+
             def _lbl_color(hex_c):
+                if use_black_masses:
+                    return "#000000"
                 return hex_c if use_row_color else self._label_color
 
             if stack_mode:
@@ -11480,366 +10837,7 @@ class PlottingToolWindow(QtWidgets.QWidget):
 #  Interactive Tutorial Overlay
 # ─────────────────────────────────────────────
 
-class TutorialOverlay(QtWidgets.QWidget):
-    """
-    Full-window semi-transparent overlay that spotlights a target widget
-    and shows an instruction bubble next to it.
-    """
-
-    STEPS = [
-        {
-            "target":  lambda: menu_bar,
-            "title":   "Menu bar",
-            "body":    "All main features are accessible from here.\n"
-                       "File, View, Analysis, Peaks, Plot, Display and Help.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: folder_path_label,
-            "title":   "Current folder",
-            "body":    "This shows which folder or virtual file list is loaded.\n"
-                       "Use  File → Open Folder  or drag-and-drop files to change it.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: files_section,
-            "title":   "Files & Overlays",
-            "body":    "Select the main spectrum file here.\n"
-                       "Use  neg / pos  to filter by polarity.\n"
-                       "Click  + Add Overlay  to load additional spectra on top.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: polarity_combo,
-            "title":   "Polarity filter",
-            "body":    "Switch between negative and positive mode.\n"
-                       "Only files containing 'neg' or 'pos' in their name are shown.",
-            "anchor":  "right",
-        },
-        {
-            "target":  lambda: combo,
-            "title":   "File selector",
-            "body":    "Choose which spectrum file to display as the main spectrum.\n"
-                       "The plot updates immediately when you change selection.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: overlay_opacity_slider,
-            "title":   "Overlay opacity",
-            "body":    "Controls the transparency of all overlay spectra.\n"
-                       "Ctrl+Scroll or Ctrl+↑↓ also cycles through overlays one at a time.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: highlight_slider,
-            "title":   "Highlight intensity",
-            "body":    "Controls how strongly highlighted peaks stand out.\n"
-                       "At maximum, peaks appear in their full chosen colour.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: plot_widget,
-            "title":   "Spectrum plot",
-            "body":    "• Click and drag to pan.\n"
-                       "• Scroll wheel to zoom.\n"
-                       "• Press Z to toggle zoom-box mode.\n"
-                       "• Right-click for axis options.\n"
-                       "• Cross-lines follow your cursor showing m/z and intensity.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: peaks_action.associatedWidgets()[0] if peaks_action.associatedWidgets() else menu_bar,
-            "title":   "Peak list  (Ctrl+P)",
-            "body":    "Open with  Peaks → Open Peaks List  or Ctrl+P.\n\n"
-                       "Each row highlights a set of m/z values on the spectrum.\n"
-                       "Rows can be defined by manual entry or as a range (start→end, step).\n"
-                       "Press P to enable click-to-pick mode on the plot.\n\n"
-                       "The Peaks window is a separate panel - open it to manage your peak lists.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: dt_combo,
-            "title":   "dt filter",
-            "body":    "Filter files by the dt value encoded in the filename (e.g. _dt071).\n"
-                       "Only dt values present for the selected polarity are shown.\n"
-                       "'All' disables the filter.\n"
-                       "Each overlay has its own independent dt filter.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: menu_bar,
-            "title":   "Processing menu",
-            "body":    "Baseline Correction and Recalibration are in the Processing menu.\n\n"
-                       "• airPLS / SNIP baseline correction removes background signal.\n"
-                       "• Auto-Recalibrate fits a quadratic TOF polynomial automatically.\n"
-                       "• Manual Recalibrate lets you choose anchor peaks yourself.\n"
-                       "• Normalize Spectrum - output a file with intensities scaled to 1.\n"
-                       "• Batch versions process entire folders.\n"
-                       "• Residuals are saved in a subfolder alongside output files.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: menu_bar,
-            "title":   "Analysis menu",
-            "body":    "Advanced analysis tools are in the Analysis menu.\n\n"
-                       "• Cluster Detection - finds repeating peak series (e.g. water clusters).\n"
-                       "• Compare Common/Unique Peaks - highlights shared and unique peaks "
-                       "across visible spectra with coloured vertical lines.\n"
-                       "• Measure Peak Area - interactive range measurement, total spectrum "
-                       "area, and peak-list area ratios.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: stacked_mode_chk,
-            "title":   "Stacked mode",
-            "body":    "Toggle 'Stacked' to view all visible spectra in separate sub-plots.\n\n"
-                       "Each row is normalised to 0–1 so heights are directly comparable. "
-                       "X axes are linked - panning one row moves all.\n\n"
-                       "The 'Log Y' checkbox beside it switches all rows to a logarithmic Y scale.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: sigma3_clip_chk,
-            "title":   "Sigma noise clipping",
-            "body":    "The 'σ Clip' checkbox suppresses baseline noise on the main plot.\n\n"
-                       "The slider next to it (1.0 – 4.0 σ) sets how aggressively noise is clipped. "
-                       "Lower values clip more; higher values keep more of the baseline.\n\n"
-                       "This works independently of Dynamic Scale and is remembered between sessions.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: menu_bar,
-            "title":   "Normalisation (Processing menu)",
-            "body":    "Processing → Normalize Spectrum scales intensities so the tallest peak = 1, "
-                       "or so a specific m/z value = 1.\n\n"
-                       "The result appears as an overlay with a 💾 Save button. "
-                       "A batch version processes an entire folder at once.\n\n"
-                       "No hard noise floor is applied - use σ Clip if you want to suppress baseline.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: menu_bar,
-            "title":   "You're all set!",
-            "body":    "That covers the main features.\n\n"
-                       "• Revisit any topic from  Help  in the menu bar.\n"
-                       "• Hover over any button or slider for a tooltip.\n"
-                       "• Ctrl+Q to quit.",
-            "anchor":  "below",
-        },
-    ]
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._step = 0
-        self._spotlight_rect = QtCore.QRect()
-        self._parent_pixmap  = None
-
-        # ── Bubble widget ──────────────────────────────────────────────
-        self._bubble = QtWidgets.QFrame(self)
-        self._bubble.setObjectName("tutorialBubble")
-        self._bubble.setStyleSheet("""
-            QFrame#tutorialBubble {
-                background: #1e293b;
-                border: 1.5px solid #3b82f6;
-                border-radius: 10px;
-            }
-        """)
-        bubble_layout = QtWidgets.QVBoxLayout(self._bubble)
-        bubble_layout.setContentsMargins(14, 12, 14, 10)
-        bubble_layout.setSpacing(6)
-
-        # Title
-        self._title_lbl = QtWidgets.QLabel()
-        self._title_lbl.setStyleSheet(
-            "color: #60a5fa; font-size: 13px; font-weight: bold; background: transparent;")
-        self._title_lbl.setWordWrap(True)
-        bubble_layout.addWidget(self._title_lbl)
-
-        # Body
-        self._body_lbl = QtWidgets.QLabel()
-        self._body_lbl.setStyleSheet(
-            "color: #e2e8f0; font-size: 11px; background: transparent;")
-        self._body_lbl.setWordWrap(True)
-        self._body_lbl.setMinimumWidth(280)
-        self._body_lbl.setMaximumWidth(360)
-        bubble_layout.addWidget(self._body_lbl)
-
-        # Progress + buttons
-        ctrl_row = QtWidgets.QHBoxLayout()
-        self._progress_lbl = QtWidgets.QLabel()
-        self._progress_lbl.setStyleSheet(
-            "color: #64748b; font-size: 10px; background: transparent;")
-        ctrl_row.addWidget(self._progress_lbl)
-        ctrl_row.addStretch()
-
-        self._skip_btn = QtWidgets.QPushButton("Skip")
-        self._skip_btn.setFixedHeight(26)
-        self._skip_btn.setStyleSheet(
-            "QPushButton { color: #94a3b8; background: transparent; "
-            "border: 1px solid #475569; border-radius: 4px; padding: 0 8px; }"
-            "QPushButton:hover { color: #e2e8f0; border-color: #94a3b8; }")
-        self._skip_btn.clicked.connect(self.close_tutorial)
-
-        self._back_btn = QtWidgets.QPushButton("← Back")
-        self._back_btn.setFixedHeight(26)
-        self._back_btn.setStyleSheet(
-            "QPushButton { color: #94a3b8; background: transparent; "
-            "border: 1px solid #475569; border-radius: 4px; padding: 0 8px; }"
-            "QPushButton:hover { color: #e2e8f0; border-color: #94a3b8; }")
-        self._back_btn.clicked.connect(self._go_back)
-
-        self._next_btn = QtWidgets.QPushButton("Next →")
-        self._next_btn.setFixedHeight(26)
-        self._next_btn.setStyleSheet(
-            "QPushButton { color: white; background: #3b82f6; "
-            "border: none; border-radius: 4px; padding: 0 12px; font-weight: bold; }"
-            "QPushButton:hover { background: #2563eb; }")
-        self._next_btn.clicked.connect(self._go_next)
-
-        ctrl_row.addWidget(self._skip_btn)
-        ctrl_row.addWidget(self._back_btn)
-        ctrl_row.addWidget(self._next_btn)
-        bubble_layout.addLayout(ctrl_row)
-
-        self._bubble.adjustSize()
-        self._update_step()
-
-    # ── Navigation ────────────────────────────────────────────────────
-    def _go_next(self):
-        if self._step < len(self.STEPS) - 1:
-            self._step += 1
-            self._update_step()
-        else:
-            self.close_tutorial()
-
-    def _go_back(self):
-        if self._step > 0:
-            self._step -= 1
-            self._update_step()
-
-    def _update_step(self):
-        step = self.STEPS[self._step]
-        n    = len(self.STEPS)
-
-        # Run any pre-action (e.g. open a window)
-        if "pre" in step:
-            try:
-                step["pre"]()
-                app.processEvents()
-            except Exception:
-                pass
-
-        self._title_lbl.setText(step["title"])
-        self._body_lbl.setText(step["body"])
-        self._progress_lbl.setText(f"{self._step + 1} / {n}")
-        self._back_btn.setEnabled(self._step > 0)
-        is_last = self._step == n - 1
-        self._next_btn.setText("Finish" if is_last else "Next →")
-        self._skip_btn.setVisible(not is_last)
-
-        # Resolve target widget
-        try:
-            target = step["target"]()
-        except Exception:
-            target = None
-
-        self._compute_spotlight(target)
-        self._position_bubble(target, step.get("anchor", "below"))
-        self._refresh_parent_pixmap()   # grab before update() triggers paint
-        self.update()
-
-    def _compute_spotlight(self, target):
-        if target is None or not target.isVisible():
-            self._spotlight_rect = QtCore.QRect()
-            return
-        # Map target rect to overlay (parent) coordinates
-        tl = target.mapTo(self.parent(), QtCore.QPoint(0, 0))
-        self._spotlight_rect = QtCore.QRect(tl, target.size()).adjusted(-6, -6, 6, 6)
-
-    def _position_bubble(self, target, anchor):
-        self._bubble.adjustSize()
-        bw = self._bubble.width()
-        bh = self._bubble.height()
-        pw = self.width()
-        ph = self.height()
-        pad = 14
-
-        if target is None or not target.isVisible() or self._spotlight_rect.isEmpty():
-            # Centre on screen
-            self._bubble.move((pw - bw) // 2, (ph - bh) // 2)
-            return
-
-        sr = self._spotlight_rect
-        if anchor == "below":
-            x = max(pad, min(sr.left(), pw - bw - pad))
-            y = min(sr.bottom() + pad, ph - bh - pad)
-        elif anchor == "above":
-            x = max(pad, min(sr.left(), pw - bw - pad))
-            y = max(pad, sr.top() - bh - pad)
-        elif anchor == "right":
-            x = min(sr.right() + pad, pw - bw - pad)
-            y = max(pad, min(sr.top(), ph - bh - pad))
-        elif anchor == "left":
-            x = max(pad, sr.left() - bw - pad)
-            y = max(pad, min(sr.top(), ph - bh - pad))
-        else:
-            x = (pw - bw) // 2
-            y = (ph - bh) // 2
-
-        self._bubble.move(x, y)
-
-    # ── Painting ──────────────────────────────────────────────────────
-    def _refresh_parent_pixmap(self):
-        """Grab parent content while hidden so there's no recursive paint."""
-        if getattr(self, '_refreshing_pixmap', False):
-            return   # guard against re-entrant calls
-        self._refreshing_pixmap = True
-        try:
-            self.hide()
-            self._parent_pixmap = self.parent().grab()
-            self.show()
-        finally:
-            self._refreshing_pixmap = False
-
-    def paintEvent(self, event):
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-
-        # Fill entire overlay with semi-transparent dark
-        painter.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 160))
-
-        if not self._spotlight_rect.isEmpty() and self._parent_pixmap is not None:
-            # Cut out the spotlight area using the pre-captured pixmap
-            painter.drawPixmap(self._spotlight_rect,
-                               self._parent_pixmap, self._spotlight_rect)
-
-            # Blue highlight ring
-            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            painter.setPen(QtGui.QPen(QtGui.QColor("#3b82f6"), 2.0))
-            painter.drawRoundedRect(self._spotlight_rect, 6, 6)
-
-        painter.end()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if not getattr(self, '_refreshing_pixmap', False):
-            self._update_step()
-
-    # ── Public ────────────────────────────────────────────────────────
-    def close_tutorial(self):
-        self.hide()
-        self.deleteLater()
-
-    def mousePressEvent(self, event):
-        # Click outside bubble advances to next step
-        if not self._bubble.geometry().contains(event.pos()):
-            self._go_next()
-        else:
-            super().mousePressEvent(event)
-
+# TutorialOverlay — defined in droplet/ui/windows/tutorial.py
 # ─────────────────────────────────────────────
 #  Help topic dialogs
 # ─────────────────────────────────────────────

@@ -18,11 +18,19 @@ def _get_app():
     return _m
 
 
+_comparison_win_ref = None
+
+
 class PeakComparisonWindow(QtWidgets.QWidget):
     """
     Non-modal window.  Detects peaks in each visible spectrum, classifies
     them as common (present in ALL spectra) or unique (present in only one),
     then draws coloured InfiniteLines on the main plot.
+
+    Three opacity sliders control:
+        • background   – the spectrum curves themselves
+        • common peaks – green vertical lines
+        • unique peaks – per-spectrum coloured lines
     """
 
     def __init__(self, parent=None):
@@ -38,6 +46,7 @@ class PeakComparisonWindow(QtWidgets.QWidget):
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
 
+        # ── Detection parameters ───────────────────────────────────────────
         param_box = QtWidgets.QGroupBox("Detection parameters")
         pg_layout = QtWidgets.QGridLayout(param_box)
         pg_layout.setSpacing(6)
@@ -66,6 +75,7 @@ class PeakComparisonWindow(QtWidgets.QWidget):
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         root.addWidget(param_box)
 
+        # ── Opacity sliders ────────────────────────────────────────────────
         op_box = QtWidgets.QGroupBox("Opacity")
         op_layout = QtWidgets.QGridLayout(op_box)
         op_layout.setSpacing(6)

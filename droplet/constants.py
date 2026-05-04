@@ -1,7 +1,5 @@
 """Application-wide constants with no runtime dependencies."""
 
-from droplet import APP_VERSION  # re-export for convenience
-
 MAX_RECENT = 10
 VIRTUAL_FOLDER_PREFIX = "VIRTUAL FOLDER: "
 

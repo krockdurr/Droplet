@@ -1,8 +1,8 @@
 # SetProcessDpiAwareness(2) has been intentionally removed - see droplet/app.py for details.
-"""Droplet v2.5.2 - entry point.
+"""Droplet v2.6.2 - entry point.
 
 Run this file directly:
-    python Droplet_v2.5.2.py
+    python Droplet_v2.6.2.py
 
 All application logic lives in the droplet/ package:
     droplet/app.py              - main window, menus, render loop, glue code
