@@ -53,7 +53,7 @@ import warnings
 warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.6.3"
 
 from droplet.ui.windows.residuals_viewer import ResidualsViewerWindow
 from droplet.ui.windows.cluster_detection import ClusterDetectionWindow
@@ -385,14 +385,26 @@ _history_locked = False
 # ─────────────────────────────────────────────
 peaks_win = QtWidgets.QWidget()
 peaks_win.setWindowTitle("Peaks")
-peaks_win.resize(500, 400)
-peaks_layout = QtWidgets.QVBoxLayout()
-peaks_win.setLayout(peaks_layout)
+peaks_win.resize(740, 420)
+
+# Root layout: menu bar at top, horizontal splitter below
+_pw_root_layout = QtWidgets.QVBoxLayout(peaks_win)
+_pw_root_layout.setContentsMargins(0, 0, 0, 0)
+_pw_root_layout.setSpacing(0)
 
 peaks_win_menu = QtWidgets.QMenuBar()
 pw_file_menu  = peaks_win_menu.addMenu("File")
 pw_peaks_menu = peaks_win_menu.addMenu("Peaks")
-peaks_layout.setMenuBar(peaks_win_menu)
+_pw_root_layout.setMenuBar(peaks_win_menu)
+
+# Splitter: left = existing peaks content, right = confirmation panel
+_pw_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+_pw_root_layout.addWidget(_pw_splitter)
+
+_pw_left = QtWidgets.QWidget()
+peaks_layout = QtWidgets.QVBoxLayout(_pw_left)
+_pw_splitter.addWidget(_pw_left)
+_pw_splitter.setCollapsible(0, False)
 
 import_action   = QtWidgets.QAction("Import...",             peaks_win)
 export_action   = QtWidgets.QAction("Export...",             peaks_win)
@@ -5011,7 +5023,8 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
 
     groups = []  # {mid_mz, peak_mz, peak_int, labels, colors}
 
-    for row in custom_peak_rows:
+    _foc_idx = _conf_focused_row_idx[0]
+    for _ri, row in enumerate(custom_peak_rows):
         if not row["checkbox"].isChecked():
             continue
         peaks = parse_peaks_text(row["peaks_input"].text())
@@ -5019,6 +5032,7 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
             continue
         color_str = row["color"][0].name()
         lbl = row["label_input"].text().strip() or "Custom peaks"
+        _ralpha = pk_alpha if _foc_idx < 0 or _ri == _foc_idx else max(pk_alpha // 4, 15)
 
         peaks_flat = []
         for group in peaks:
@@ -5026,7 +5040,6 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
                 group = [group]
             peaks_flat.extend(group)
 
-        # Find the nearest m/z point in the normalised spectrum for each peak
         # Find the nearest m/z point in the normalised spectrum for each peak
         for peak_mz_target in peaks_flat:
             idx = np.argmin(np.abs(norm_mz - peak_mz_target))
@@ -5037,7 +5050,7 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
             geom_list = _get_highlight_geometry(data_df, [peak_mz_target])
             for (mz_arr, int_arr, mz_min, mz_max, _pmz, _pint) in geom_list:
                 bg_color = pg.mkColor(theme_color)
-                hi_color = apply_alpha(color_str, pk_alpha)
+                hi_color = apply_alpha(color_str, _ralpha)
                 bar_idx = np.searchsorted(mz_vals, mz_arr).clip(0, len(int_vals) - 1)
                 norm_arr = int_vals[bar_idx]
                 sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(bg_color, width=3))
@@ -5638,14 +5651,16 @@ def _do_render_plot():
                 _hl_df = None
 
         if _hl_df is not None:
-            for row in custom_peak_rows:
+            _foc_idx = _conf_focused_row_idx[0]
+            for _ri, row in enumerate(custom_peak_rows):
                 if not row["checkbox"].isChecked(): continue
                 peaks = parse_peaks_text(row["peaks_input"].text())
                 if not peaks: continue
                 color = row["color"][0].name()
                 lbl   = row["label_input"].text().strip() or "Custom peaks"
+                _ralpha = pk_alpha if _foc_idx < 0 or _ri == _foc_idx else max(pk_alpha // 4, 15)
                 highlight_peaks(_hl_df, [peaks], color, peak_label=lbl,
-                                alpha=pk_alpha, bg_color_str=main_color_str)
+                                alpha=_ralpha, bg_color_str=main_color_str)
 
     if not do_sub:
         for ov_data in overlay_list:
@@ -5665,14 +5680,16 @@ def _do_render_plot():
                 ov_df["mz"].values, ov_df["intensity"].values,
                 pen=overlay_pen(ov_data["color"], alpha), name=ov_name)
             _overlay_curves[id(ov_data)] = ov_curve
-            for row in custom_peak_rows:
+            _foc_idx = _conf_focused_row_idx[0]
+            for _ri, row in enumerate(custom_peak_rows):
                 if not row["checkbox"].isChecked(): continue
                 peaks = parse_peaks_text(row["peaks_input"].text())
                 if not peaks: continue
                 color = row["color"][0].name()
                 lbl   = row["label_input"].text().strip() or "Custom peaks"
+                _ralpha = pk_alpha if _foc_idx < 0 or _ri == _foc_idx else max(pk_alpha // 4, 15)
                 highlight_peaks(ov_df, [peaks], color, peak_label=lbl,
-                                alpha=pk_alpha, bg_color_str=main_color_str)
+                                alpha=_ralpha, bg_color_str=main_color_str)
     else:
         hover_label.setText(
             f"<span style='color:orange'>Δ = {primary_name} − overlay 1</span>")
@@ -6083,6 +6100,11 @@ def save_project_as():
             pass
     project["plots"] = plots_to_save
 
+    # ── Peak list confirmation ────────────────────────────────────────
+    _cp = _confirmation_panel_ref[0]
+    if _cp is not None:
+        project["peak_confirmation"] = _cp.to_project_dict()
+
     try:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(project, fh, indent=2)
@@ -6261,6 +6283,14 @@ def open_project():
 
     render_plot()
 
+    # ── Restore peak list confirmation ────────────────────────────────
+    _cp = _confirmation_panel_ref[0]
+    _conf_data = project.get("peak_confirmation")
+    if _cp is not None:
+        if _conf_data:
+            _cp.from_project_dict(_conf_data)
+        _sync_confirmation_panel()
+
 # ─────────────────────────────────────────────
 #  Drag-and-drop
 # ─────────────────────────────────────────────
@@ -6293,6 +6323,20 @@ def handle_dropped_files(paths):
     update_folder_label(); refresh_all_combos()
 
 # ─────────────────────────────────────────────
+#  Confirmation panel sync helpers
+# ─────────────────────────────────────────────
+_confirmation_panel_ref = [None]  # set after panel is created
+_conf_focused_row_idx   = [-1]    # peak-row index hovered in confirmation panel
+
+def _sync_confirmation_panel():
+    """Push the current peak rows into the confirmation panel (no-op until panel exists)."""
+    panel = _confirmation_panel_ref[0]
+    if panel is None:
+        return
+    from droplet.ui.windows.peak_confirmation import _row_dict_from_widget_row as _rdfwr
+    panel.sync_with_peak_rows([_rdfwr(r) for r in custom_peak_rows])
+
+# ─────────────────────────────────────────────
 #  Peaks window – rows with drag-to-reorder
 # ─────────────────────────────────────────────
 custom_peak_rows = []
@@ -6320,6 +6364,7 @@ class PeakRowsContainer(QtWidgets.QWidget):
         custom_peak_rows.insert(to_idx, row)
         update_pick_row_combo()
         render_plot()
+        _sync_confirmation_panel()
 
 peaks_rows_container = PeakRowsContainer()
 peaks_rows_scroll    = QtWidgets.QScrollArea()
@@ -6605,6 +6650,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         peaks_rows_layout_remove(row_widget)
         _clear_highlight_cache()
         update_pick_row_combo(); render_plot()
+        _sync_confirmation_panel()
 
     remove_btn.clicked.connect(on_remove)
     checkbox.stateChanged.connect(lambda _: _render_peaks_or_full())
@@ -6621,6 +6667,7 @@ def add_peak_row(checked=True, color=None, peaks_text="", label_text=""):
     _add_peak_row_base(checked=checked, color=color,
                        peaks_text=peaks_text, label_text=label_text)
     update_pick_row_combo()
+    _sync_confirmation_panel()
 
 _add_peak_row_base()
 
@@ -6669,6 +6716,7 @@ def _load_peak_file_into_rows(path):
                 label_text=item.get("label", ""))
     _clear_highlight_cache()
     update_pick_row_combo(); render_plot()
+    _sync_confirmation_panel()
 
 def _update_peak_nav_buttons():
     pos = _peak_file_hist_pos[0]
@@ -6825,6 +6873,65 @@ def show_peaks_help():
         "  Ctrl+Scroll or Ctrl+↑↓ nudges the overlay opacity slider by 5 %.")
 
 peaks_help_btn.clicked.connect(show_peaks_help)
+
+# ─────────────────────────────────────────────
+#  Peak list confirmation panel (right side of peaks window splitter)
+# ─────────────────────────────────────────────
+from droplet.ui.windows.peak_confirmation import ConfirmationPanel as _ConfPanelCls
+
+peaks_confirmation_panel = _ConfPanelCls()
+peaks_confirmation_panel.set_get_available_files(
+    lambda: get_txt_files(polarity_combo.currentText())
+)
+_pw_splitter.addWidget(peaks_confirmation_panel)
+_pw_splitter.setSizes([500, 0])   # start collapsed
+_pw_splitter.setCollapsible(1, True)
+_confirmation_panel_ref[0] = peaks_confirmation_panel
+
+# Toggle action in the File menu of the peaks window
+pw_confirm_toggle_action = QtWidgets.QAction("Peak list confirmation", peaks_win, checkable=True)
+pw_file_menu.addSeparator()
+pw_file_menu.addAction(pw_confirm_toggle_action)
+
+def _on_confirm_panel_toggle(checked):
+    sizes = _pw_splitter.sizes()
+    total = sum(sizes)
+    if checked:
+        _pw_splitter.setSizes([max(total - 360, 300), 360])
+    else:
+        _pw_splitter.setSizes([total, 0])
+
+pw_confirm_toggle_action.toggled.connect(_on_confirm_panel_toggle)
+
+def _conf_load_file_in_main(filepath):
+    """Load a sample file in the main spectrum viewer (triggered by cell hover)."""
+    if not filepath or not os.path.exists(filepath):
+        return
+    idx = combo.findData(filepath)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    else:
+        combo.blockSignals(True)
+        combo.addItem(os.path.basename(filepath), filepath)
+        combo.setCurrentIndex(combo.count() - 1)
+        combo.blockSignals(False)
+        plot_file(filepath)
+
+def _conf_focus_peak_row(row_idx):
+    _conf_focused_row_idx[0] = row_idx
+    render_plot()
+
+def _conf_unfocus_peak_rows():
+    if _conf_focused_row_idx[0] >= 0:
+        _conf_focused_row_idx[0] = -1
+        render_plot()
+
+peaks_confirmation_panel.request_load_file.connect(_conf_load_file_in_main)
+peaks_confirmation_panel.request_focus_row.connect(_conf_focus_peak_row)
+peaks_confirmation_panel.request_unfocus.connect(_conf_unfocus_peak_rows)
+
+# Initial sync so that any pre-loaded peak rows appear in the panel
+_sync_confirmation_panel()
 
 # ─────────────────────────────────────────────
 #  Auto-load last peak list
@@ -6989,6 +7096,7 @@ def _restore_snapshot(snapshot):
     if isinstance(snapshot, dict) and "pick_row" in snapshot:
         pick_row_combo.setCurrentIndex(snapshot["pick_row"])
     render_plot()
+    _sync_confirmation_panel()
 
 def undo_peaks():
     if not _peak_history: return
@@ -7614,7 +7722,23 @@ def _on_filter_changed():
     if combo.count() > 0 and combo.currentData():
         plot_file(combo.currentData())
 
-polarity_combo.currentIndexChanged.connect(lambda _: _on_filter_changed())
+def _guard_polarity_change():
+    """Intercept polarity changes to warn about unsaved confirmation data."""
+    pol   = polarity_combo.currentText()
+    _cp   = _confirmation_panel_ref[0]
+    if _cp is not None and pol in ("neg", "pos") and pol != _cp._current_mode:
+        if not _cp.check_dirty_before_mode_change(pol):
+            # Revert the combo to the current panel mode
+            polarity_combo.blockSignals(True)
+            prev_idx = polarity_combo.findText(_cp._current_mode)
+            if prev_idx >= 0:
+                polarity_combo.setCurrentIndex(prev_idx)
+            polarity_combo.blockSignals(False)
+            return
+        _cp.set_mode(pol)
+    _on_filter_changed()
+
+polarity_combo.currentIndexChanged.connect(lambda _: _guard_polarity_change())
 dt_combo.currentIndexChanged.connect(lambda _: _on_filter_changed())
 peaks_action.triggered.connect(open_peaks_window)
 import_action.triggered.connect(import_peak_list)
