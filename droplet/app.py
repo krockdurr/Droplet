@@ -1245,6 +1245,10 @@ sigma3_slider.valueChanged.connect(_set_sigma3_n_sigma)
 plot_widget = pg.GraphicsLayoutWidget()
 main_layout.addWidget(plot_widget)
 
+status_bar = QtWidgets.QStatusBar()
+status_bar.setSizeGripEnabled(False)
+main_layout.addWidget(status_bar)
+
 plot = plot_widget.addPlot()
 plot.setLabel('bottom', 'm/z')
 plot.setLabel('left',   'Intensity')
@@ -5964,7 +5968,7 @@ _current_project_path = [None]   # mutable container for the active project path
 
 def _show_toast(message, duration_ms=2500):
     """Briefly show a non-modal status message in the main window status bar."""
-    main_win.statusBar().showMessage(message, duration_ms)
+    status_bar.showMessage(message, duration_ms)
 
 def _write_project(path):
     """Core project serialization — path must already be validated."""
