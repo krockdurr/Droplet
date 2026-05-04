@@ -43,7 +43,7 @@ Droplet is a desktop application for loading, visualising, annotating, and proce
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/<your-username>/Droplet.git
+git clone https://github.com/krockdurr/Droplet.git
 cd Droplet
 
 # 2. (Recommended) create a virtual environment
