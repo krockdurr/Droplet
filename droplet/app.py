@@ -53,7 +53,7 @@ import warnings
 warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 
-APP_VERSION = "2.6.3"
+APP_VERSION = "2.6.4"
 
 from droplet.ui.windows.residuals_viewer import ResidualsViewerWindow
 from droplet.ui.windows.cluster_detection import ClusterDetectionWindow
@@ -492,7 +492,7 @@ recent_files_menu   = file_menu.addMenu("Recent Files")
 
 # ── View ──────────────────────────────────────
 _stacked_mode    = settings.value("stacked_mode",       False, type=bool)
-_stacked_log_y   = settings.value("stacked_log_y",      False, type=bool)
+_log_y = settings.value("log_y", False, type=bool)
 _stacked_mirror  = settings.value("stacked_mirror",     False, type=bool)
 _stacked_mirror_odd = settings.value("stacked_mirror_odd", False, type=bool)
 _sigma3_clip        = settings.value("sigma3_clip",        False, type=bool)
@@ -535,11 +535,11 @@ view_menu.addSeparator()
 stacked_mode_action = QtWidgets.QAction("Stacked Spectra Mode", main_win, checkable=True)
 stacked_mode_action.setChecked(_stacked_mode)
 view_menu.addAction(stacked_mode_action)
-stacked_logy_action = QtWidgets.QAction("  Stacked: Log Y axis", main_win, checkable=True)
-stacked_logy_action.setChecked(_stacked_log_y)
+stacked_logy_action = QtWidgets.QAction("  Log Y axis", main_win, checkable=True)
+stacked_logy_action.setChecked(_log_y)
 stacked_logy_action.toggled.connect(lambda v: (
-    globals().update({"_stacked_log_y": v}),
-    settings.setValue("stacked_log_y", v),
+    globals().update({"_log_y": v}),
+    settings.setValue("log_y", v),
     render_plot()))
 view_menu.addAction(stacked_logy_action)
 stacked_mirror_action = QtWidgets.QAction("  Stacked: Mirror every 2nd row", main_win, checkable=True)
@@ -613,6 +613,10 @@ crosshair_action.setChecked(True)
 
 # ── Analysis ──────────────────────────────────
 analysis_menu = menu_bar.addMenu("Processing")
+
+tof_to_mass_action = QtWidgets.QAction("ToF → Mass Converter…", main_win)
+analysis_menu.addAction(tof_to_mass_action)
+analysis_menu.addSeparator()
 
 baseline_submenu = analysis_menu.addMenu("Baseline Correction")
 baseline_action       = QtWidgets.QAction("Apply to Current Spectrum", main_win, checkable=True)
@@ -1145,16 +1149,16 @@ overlay_opacity_slider.setToolTip(
     "primary spectrum is easier to read through them.")
 tools_row.addWidget(overlay_opacity_slider)
 tools_row.addSpacing(16)
-stacked_mode_chk = QtWidgets.QCheckBox("Stacked")
-stacked_mode_chk.setChecked(_stacked_mode)
-stacked_mode_chk.setToolTip("Show spectra stacked in rows instead of overlapping")
-tools_row.addWidget(stacked_mode_chk)
 
 stacked_logy_chk = QtWidgets.QCheckBox("Log Y")
-stacked_logy_chk.setChecked(_stacked_log_y)
-stacked_logy_chk.setToolTip("Use logarithmic Y axis in stacked mode")
-stacked_logy_chk.setEnabled(_stacked_mode)   # only meaningful when stacked is on
+stacked_logy_chk.setChecked(_log_y)
+stacked_logy_chk.setToolTip("Use logarithmic Y axis")
 tools_row.addWidget(stacked_logy_chk)
+
+stacked_mode_chk = QtWidgets.QCheckBox("Stacked")
+# stacked_mode_chk.setChecked(_stacked_mode)
+stacked_mode_chk.setToolTip("Show spectra stacked in rows instead of overlapping")
+tools_row.addWidget(stacked_mode_chk)
 
 sigma3_clip_chk = QtWidgets.QCheckBox("σ Clip")
 sigma3_clip_chk.setChecked(_sigma3_clip)
@@ -1202,7 +1206,6 @@ def _set_stacked_mode(val):
     stacked_mode_action.blockSignals(True); stacked_mode_chk.blockSignals(True)
     stacked_mode_action.setChecked(val); stacked_mode_chk.setChecked(val)
     stacked_mode_action.blockSignals(False); stacked_mode_chk.blockSignals(False)
-    stacked_logy_chk.setEnabled(val)   # grey out Log Y when not stacked
     try:
         plot.scene().sigMouseClicked.disconnect(plot_clicked)
     except Exception:
@@ -1211,10 +1214,10 @@ def _set_stacked_mode(val):
         plot.scene().sigMouseClicked.connect(plot_clicked)
     render_plot()
 
-def _set_stacked_logy(val):
-    global _stacked_log_y
-    _stacked_log_y = val
-    settings.setValue("stacked_log_y", val)
+def _set_log_y(val):
+    global _log_y
+    _log_y = val
+    settings.setValue("log_y", val)
     stacked_logy_action.blockSignals(True); stacked_logy_chk.blockSignals(True)
     stacked_logy_action.setChecked(val); stacked_logy_chk.setChecked(val)
     stacked_logy_action.blockSignals(False); stacked_logy_chk.blockSignals(False)
@@ -1225,8 +1228,8 @@ stacked_mode_chk.stateChanged.connect(lambda v: _set_stacked_mode(bool(v)))
 
 # disconnect old lambda on stacked_logy_action (it was set inline before)
 stacked_logy_action.triggered.disconnect()
-stacked_logy_action.toggled.connect(_set_stacked_logy)
-stacked_logy_chk.stateChanged.connect(lambda v: _set_stacked_logy(bool(v)))
+stacked_logy_action.toggled.connect(_set_log_y)
+stacked_logy_chk.stateChanged.connect(lambda v: _set_log_y(bool(v)))
 
 def _set_sigma3_clip(val):
     global _sigma3_clip
@@ -1264,7 +1267,7 @@ main_layout.addWidget(status_bar)
 plot = plot_widget.addPlot()
 plot.setLabel('bottom', 'm/z')
 plot.setLabel('left',   'Intensity')
-plot.setLogMode(x=False, y=True)
+plot.setLogMode(x=False, y=_log_y)
 _grid_on = settings.value("main_grid", True, type=bool)
 plot.showGrid(x=_grid_on, y=_grid_on, alpha=0.3)
 plot.vb.setMouseMode(pg.ViewBox.PanMode)
@@ -2605,7 +2608,7 @@ def _on_manual_recal_hover(item, points, ev):
 def _draw_manual_recal_scatter(mz_arr, int_arr):
     global _manual_recal_scatter_items, _manual_recal_indices
     _clear_manual_recal_scatter()
-    y_plot = np.log10(int_arr) + 0.04  # triangles float just above peak
+    y_plot = (np.log10(np.clip(int_arr, 1e-10, None)) + 0.04) if _log_y else (int_arr * 1.04)
 
     data = list(range(len(mz_arr)))
     scatter = pg.ScatterPlotItem(
@@ -2636,7 +2639,7 @@ def _draw_manual_recal_scatter(mz_arr, int_arr):
                 actual_mz  = float(sub.loc[sub['intensity'].idxmax(), 'mz'])
                 actual_int = float(sub['intensity'].max())
                 dot_x.append(actual_mz)
-                dot_y.append(np.log10(actual_int) if actual_int > 0 else 0)
+                dot_y.append((np.log10(actual_int) if actual_int > 0 else 0) if _log_y else actual_int)
         if dot_x:
             dot_scatter = pg.ScatterPlotItem(
                 x=np.array(dot_x), y=np.array(dot_y),
@@ -3185,53 +3188,31 @@ class PeakReviewWindow(QtWidgets.QWidget):
         """Draw temporary yellow overlay around the selected peak"""
         if row_idx >= len(self._detected):
             return
-        
-        # Get current detected peak values
-        _, _, det_mz, det_int = self._detected[row_idx]
-        mz_spin = self._mz_spins[row_idx].value()  # Current edited value
-        
-        # Get ~20 points around peak (±10 points each side)
+
+        mz_spin = self._mz_spins[row_idx].value()
+
         if df is None or len(df) == 0:
             return
-        
-        # Find peak in spectrum data
-        tol = 0.5  # ±0.5 Da window
-        mask = (df['mz'] >= mz_spin - tol) & (df['mz'] <= mz_spin + tol)
-        peak_data = df[mask]
-        
-        if peak_data.empty:
+
+        # Use the same geometry function as highlight_peaks so the yellow overlay
+        # always lands on exactly the same region as the colored highlight curve.
+        geom = _get_highlight_geometry(df, [mz_spin])
+        if not geom:
             return
-        
-        # Extract ~20 points around peak (or all if fewer)
-        n_points = min(20, len(peak_data))
-        center_idx = len(peak_data) // 2
-        start = max(0, center_idx - n_points // 2)
-        end = min(len(peak_data), start + n_points)
-        
-        mz_subset = peak_data.iloc[start:end]['mz'].values
-        int_subset = peak_data.iloc[start:end]['intensity'].values * 1.05  # 5% above
-        
-        # Remove existing highlight
+
+        mz_arr, int_arr = geom[0][0], geom[0][1]
+
         if self._peak_highlight_curve is not None:
             try:
                 plot.removeItem(self._peak_highlight_curve)
-            except:
+            except Exception:
                 pass
-        
-        # Draw thick yellow highlight (peak) + thin white outline
+
         self._peak_highlight_curve = plot.plot(
-            mz_subset, int_subset,
-            pen=pg.mkPen('#ffff00', width=4),  # Thick yellow
+            mz_arr, int_arr,
+            pen=pg.mkPen('#ffff00', width=4),
             name="peak_highlight"
         )
-        # white_outline = plot.plot(
-        #     mz_subset, int_subset,
-        #     pen=pg.mkPen('w', width=2),  # Thin white outline on top
-        #     name="peak_outline"
-        # )
-        
-        # # Store white outline to remove later
-        # self._peak_highlight_curve._outline = white_outline
 
 
 
@@ -4061,6 +4042,674 @@ def _batch_process_file(args):
     except Exception as e:
         return f"{os.path.basename(path)}: {e}"
 
+def _detect_file_sep(path):
+    """Return the column separator used in a spectrum file."""
+    try:
+        with open(path, 'r', errors='replace') as fh:
+            lines = [fh.readline() for _ in range(20)]
+        return detect_separator(lines)
+    except Exception:
+        return "\t"
+
+
+def _write_tof_transformed(data_df, out_path, src_path, sep,
+                           unit, ref_times, ref_masses, a, b, r2):
+    """
+    Write a ToF→mass-transformed DataFrame to *out_path*, preserving the
+    original file's header comments and appending a transformation-info block.
+
+    Layout:
+        #processed=tof_mass_transformed
+        [original # header lines]
+        ##########
+        #tof2mass_unit=µs
+        #tof2mass_ref_times=10.234,25.678
+        #tof2mass_ref_masses=18.0000,100.0000
+        #tof2mass_a=12.345678
+        #tof2mass_b=-1.234567
+        #tof2mass_r2=0.99987
+        ##########
+        [data rows separated by *sep*]
+    """
+    ref_t_str = ";".join(f"{t:.6g}" for t in ref_times)
+    ref_m_str = ";".join(f"{m:.6g}" for m in ref_masses)
+    with open(out_path, 'w', encoding='utf-8') as fh:
+        fh.write("#processed=tof_mass_transformed\n")
+        if src_path and os.path.isfile(str(src_path)):
+            for hline in read_spectrum_headers(str(src_path)):
+                fh.write(hline + "\n")
+        fh.write("##########\n")
+        fh.write(f"#tof2mass_unit={unit}\n")
+        fh.write(f"#tof2mass_ref_times={ref_t_str}\n")
+        fh.write(f"#tof2mass_ref_masses={ref_m_str}\n")
+        fh.write(f"#tof2mass_a={a:.10g}\n")
+        fh.write(f"#tof2mass_b={b:.10g}\n")
+        fh.write(f"#tof2mass_r2={r2:.8f}\n")
+        fh.write("##########\n")
+        for row in data_df.itertuples(index=False):
+            fh.write(f"{row.mz}{sep}{row.intensity}\n")
+
+
+class TofToMassWindow(QtWidgets.QWidget):
+    """
+    Interactive ToF → Mass converter.
+
+    The spectrum file is assumed to have *time* values on its X axis
+    (stored in the 'mz' column by the reader).  The user supplies
+    reference (time, mass) pairs; the tool fits  t = a·√m + b  by
+    exact solution (2 pairs) or least-squares (≥ 3 pairs) and then
+    rewrites the X axis in Da.
+
+    Red inverted triangles mark the detected spectrum peak nearest to
+    each reference time, with a nudge slider identical to the one used
+    in the Peak Review window.
+    """
+
+    _UNIT_TO_US = {"s": 1e6, "ms": 1e3, "µs": 1.0, "ns": 1e-3}
+
+    def __init__(self):
+        super().__init__(None, QtCore.Qt.WindowType.Window)
+        self.setWindowTitle("ToF → Mass Converter")
+        self.resize(640, 560)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+        self._pair_rows  = []   # list of row dicts (see _add_pair_row)
+        self._a = None
+        self._b = None
+        self._r2 = None
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+
+        # ── Time unit ──────────────────────────────────────────────
+        unit_row = QtWidgets.QHBoxLayout()
+        unit_row.addWidget(QtWidgets.QLabel("Time unit:"))
+        self._unit_combo = QtWidgets.QComboBox()
+        self._unit_combo.addItems(["s", "ms", "µs", "ns"])
+        saved_unit = settings.value("tof2mass/time_unit", "µs")
+        idx = self._unit_combo.findText(saved_unit)
+        if idx >= 0:
+            self._unit_combo.setCurrentIndex(idx)
+        unit_row.addWidget(self._unit_combo)
+        unit_row.addStretch()
+        root.addLayout(unit_row)
+        self._unit_combo.currentTextChanged.connect(self._on_unit_changed)
+
+        # ── Column headers ─────────────────────────────────────────
+        hdr = QtWidgets.QHBoxLayout()
+        lbl_time = QtWidgets.QLabel("Reference time")
+        lbl_time.setToolTip("Time value at which this peak appears in the spectrum")
+        lbl_nudge = QtWidgets.QLabel("Nudge")
+        lbl_nudge.setToolTip("Slide to shift the reference time by ±2 units")
+        lbl_mass = QtWidgets.QLabel("Known mass (Da)")
+        lbl_mass.setToolTip("Theoretical / known mass of this peak")
+        for lbl in (lbl_time, lbl_nudge, lbl_mass):
+            hdr.addWidget(lbl)
+            hdr.addStretch()
+        root.addLayout(hdr)
+
+        # ── Scrollable pair list ───────────────────────────────────
+        self._pairs_layout = QtWidgets.QVBoxLayout()
+        self._pairs_layout.setSpacing(4)
+        pairs_container = QtWidgets.QWidget()
+        pairs_container.setLayout(self._pairs_layout)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(pairs_container)
+        scroll.setMinimumHeight(160)
+        scroll.setMaximumHeight(300)
+        root.addWidget(scroll)
+
+        # Start with two empty rows
+        self._add_pair_row()
+        self._add_pair_row()
+
+        add_btn = QtWidgets.QPushButton("+ Add reference pair")
+        add_btn.clicked.connect(self._add_pair_row)
+        root.addWidget(add_btn)
+
+        menu_bar = QtWidgets.QMenuBar(self)
+        file_menu = menu_bar.addMenu("File")
+        import_act = QtWidgets.QAction("Import reference…", self)
+        import_act.triggered.connect(self._import_reference)
+        export_act = QtWidgets.QAction("Export reference…", self)
+        export_act.triggered.connect(self._export_reference)
+        file_menu.addAction(import_act)
+        file_menu.addAction(export_act)
+        root.setMenuBar(menu_bar)
+
+        root.addWidget(_hsep())
+
+        # ── Solve ──────────────────────────────────────────────────
+        solve_btn = QtWidgets.QPushButton("Fit  a  and  b  from reference pairs")
+        solve_btn.setToolTip(
+            "Solves  t = a·√m + b  using the reference pairs above.\n"
+            "2 pairs → exact solution; ≥3 pairs → least-squares fit.")
+        solve_btn.clicked.connect(self._solve)
+        root.addWidget(solve_btn)
+
+        ab_row = QtWidgets.QFormLayout()
+        self._a_spin = QtWidgets.QDoubleSpinBox()
+        self._a_spin.setRange(-1e9, 1e9)
+        self._a_spin.setDecimals(8)
+        self._a_spin.setSingleStep(0.0001)
+        self._a_spin.setToolTip("Coefficient a (auto-filled by fit; editable)")
+        self._b_spin = QtWidgets.QDoubleSpinBox()
+        self._b_spin.setRange(-1e9, 1e9)
+        self._b_spin.setDecimals(8)
+        self._b_spin.setSingleStep(0.0001)
+        self._b_spin.setToolTip("Offset b (auto-filled by fit; editable)")
+        self._r2_lbl = QtWidgets.QLabel("—")
+        self._r2_lbl.setToolTip("Coefficient of determination of the fit")
+        ab_row.addRow("a =", self._a_spin)
+        ab_row.addRow("b =", self._b_spin)
+        ab_row.addRow("R² =", self._r2_lbl)
+        root.addLayout(ab_row)
+
+        # Keep _a/_b in sync with spin boxes so manual edits are used on Apply
+        self._a_spin.valueChanged.connect(lambda v: setattr(self, '_a', v))
+        self._b_spin.valueChanged.connect(lambda v: setattr(self, '_b', v))
+
+        root.addWidget(_hsep())
+
+        # ── Output mode ────────────────────────────────────────────
+        mode_grp = QtWidgets.QButtonGroup(self)
+        self._rb_current = QtWidgets.QRadioButton(
+            "Transform current file (uses reference pairs for fit)")
+        self._rb_batch   = QtWidgets.QRadioButton(
+            "Batch transform folder… (uses a and b values above for all files)")
+        self._rb_current.setChecked(True)
+        mode_grp.addButton(self._rb_current)
+        mode_grp.addButton(self._rb_batch)
+        root.addWidget(self._rb_current)
+        root.addWidget(self._rb_batch)
+
+        # ── Output folder ──────────────────────────────────────────
+        folder_row = QtWidgets.QHBoxLayout()
+        folder_row.addWidget(QtWidgets.QLabel("Output folder:"))
+        self._folder_edit = QtWidgets.QLineEdit()
+        self._folder_edit.setPlaceholderText("Select output folder…")
+        self._folder_edit.setText(settings.value("tof2mass/output_folder", ""))
+        browse_btn = QtWidgets.QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_folder)
+        folder_row.addWidget(self._folder_edit, 1)
+        folder_row.addWidget(browse_btn)
+        root.addLayout(folder_row)
+
+        # ── Apply ──────────────────────────────────────────────────
+        apply_btn = QtWidgets.QPushButton("Apply Transformation")
+        apply_btn.setToolTip(
+            "Writes the transformed spectrum to the output folder.\n"
+            "Filename: <original>_mass_transformed.<ext>")
+        apply_btn.clicked.connect(self._apply)
+        root.addWidget(apply_btn)
+
+    # ── Pair row management ────────────────────────────────────────
+
+    def _add_pair_row(self):
+        row_w = QtWidgets.QWidget()
+        row_l = QtWidgets.QHBoxLayout(row_w)
+        row_l.setContentsMargins(0, 0, 0, 0)
+        row_l.setSpacing(4)
+
+        unit = self._unit_combo.currentText()
+
+        time_spin = QtWidgets.QDoubleSpinBox()
+        time_spin.setRange(0.0, 1e12)
+        time_spin.setDecimals(6)
+        time_spin.setSingleStep(0.01)
+        time_spin.setFixedWidth(120)
+        time_spin.setToolTip(f"Reference time in {unit}")
+
+        # Slider: ±2000 steps × 0.001 = ±2 display-units nudge
+        slide = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        slide.setRange(-2000, 2000)
+        slide.setValue(0)
+        slide.setFixedWidth(100)
+        slide.setToolTip(
+            "Nudge the reference time by up to ±2 time units.\n"
+            "Resets to centre when you type a new value in the spin box.")
+
+        mass_spin = QtWidgets.QDoubleSpinBox()
+        mass_spin.setRange(0.0, 1e7)
+        mass_spin.setDecimals(4)
+        mass_spin.setSingleStep(1.0)
+        mass_spin.setFixedWidth(120)
+        mass_spin.setToolTip("Theoretical/known mass in Da")
+
+        rm_btn = QtWidgets.QPushButton("✕")
+        rm_btn.setFixedSize(24, 24)
+        rm_btn.setToolTip("Remove this reference pair")
+
+        row_dict = {
+            "widget":    row_w,
+            "time_spin": time_spin,
+            "slide":     slide,
+            "mass_spin": mass_spin,
+            "_t_base":   [0.0],   # slider anchor (mutable so closures can share it)
+            "scatter":   None,    # pg.ScatterPlotItem on main plot
+        }
+        self._pair_rows.append(row_dict)
+
+        # ── Slider / spin interaction (mirrors PeakReviewWindow pattern) ──
+        def _make_handlers(row):
+            def _on_slide(val):
+                row["time_spin"].blockSignals(True)
+                row["time_spin"].setValue(row["_t_base"][0] + val * 0.001)
+                row["time_spin"].blockSignals(False)
+                self._update_triangle(row)
+
+            def _on_spin(v):
+                row["_t_base"][0] = v
+                row["slide"].blockSignals(True)
+                row["slide"].setValue(0)
+                row["slide"].blockSignals(False)
+                self._update_triangle(row)
+
+            return _on_slide, _on_spin
+
+        on_slide, on_spin = _make_handlers(row_dict)
+        slide.valueChanged.connect(on_slide)
+        time_spin.valueChanged.connect(on_spin)
+        mass_spin.valueChanged.connect(lambda _v, r=row_dict: self._update_triangle(r))
+
+        rm_btn.clicked.connect(lambda _c=False, r=row_dict: self._remove_pair_row(r))
+
+        row_l.addWidget(time_spin)
+        row_l.addWidget(slide)
+        row_l.addWidget(QtWidgets.QLabel("→"))
+        row_l.addWidget(mass_spin)
+        row_l.addWidget(rm_btn)
+
+        self._pairs_layout.addWidget(row_w)
+
+    def _remove_pair_row(self, row_dict):
+        if len(self._pair_rows) <= 2:
+            QtWidgets.QMessageBox.information(
+                self, "Minimum rows", "At least 2 reference pairs are required.")
+            return
+        if row_dict.get("scatter") is not None:
+            try:
+                plot.removeItem(row_dict["scatter"])
+            except Exception:
+                pass
+        row_dict["widget"].deleteLater()
+        self._pair_rows.remove(row_dict)
+
+    # ── Triangle markers on the main plot ─────────────────────────
+
+    def _update_triangle(self, row_dict):
+        """Place/refresh the red inverted triangle for one reference pair."""
+        if row_dict.get("scatter") is not None:
+          try:
+              plot.removeItem(row_dict["scatter"])
+          except Exception:
+              pass
+          row_dict["scatter"] = None
+
+        t_val = row_dict["time_spin"].value()
+        if t_val <= 0:
+          return
+
+        # ── Get Y value from the DISPLAYED curve (same scale as the axis) ──
+        # _main_curve is the global PlotDataItem; its getData() returns the
+        # intensity that was actually passed to the plot (normalized if dyn is
+        # on, raw otherwise).  Using its Y avoids mismatches between df (raw)
+        # and the displayed scale.
+        peak_x = t_val
+        y_plot = None
+
+        if _main_curve is not None:
+            try:
+                xd, yd = _main_curve.getData()
+                if xd is not None and len(xd) > 0:
+                    # Nearest data point to the exact t_val (tracks the slider)
+                    idx    = int(np.argmin(np.abs(xd - t_val)))
+                    peak_x = float(xd[idx])
+                    peak_y = float(yd[idx])
+                    if _log_y:
+                        y_plot = (np.log10(peak_y) + 0.05*np.log10(peak_y)) if peak_y > 0 else 0.06
+                    else:
+                        y_plot = (peak_y + 0.05*peak_y) if peak_y > 0 else 5
+
+            except Exception:
+                pass
+
+        if y_plot is None:
+          # Fallback when the curve is not yet drawn
+          if df is None or len(df) == 0:
+              return
+          idx    = int((df['mz'] - t_val).abs().argsort().iloc[0])
+          peak_x = float(df.iloc[idx]['mz'])
+          peak_y = float(df.iloc[idx]['intensity'])
+          y_plot = (np.log10(peak_y) + 0.06) if peak_y > 0 else 0.06
+
+        sc = pg.ScatterPlotItem(
+          x=[peak_x], y=[y_plot],
+          symbol='t1', size=14,
+          pen=pg.mkPen('#cc0000', width=1.5),
+          brush=pg.mkBrush(220, 40, 40, 200),
+        )
+        plot.addItem(sc)
+        row_dict["scatter"] = sc
+
+    def _update_all_triangles(self):
+        for row in self._pair_rows:
+            self._update_triangle(row)
+
+    def _clear_triangles(self):
+        for row in self._pair_rows:
+            if row.get("scatter") is not None:
+                try:
+                    plot.removeItem(row["scatter"])
+                except Exception:
+                    pass
+                row["scatter"] = None
+
+    # ── Time-unit change ──────────────────────────────────────────
+
+    def _on_unit_changed(self, unit):
+        settings.setValue("tof2mass/time_unit", unit)
+        for row in self._pair_rows:
+            row["time_spin"].setToolTip(f"Reference time in {unit}")
+        self._update_all_triangles()
+
+    # ── Fit ───────────────────────────────────────────────────────
+
+    def _get_pairs_us(self):
+        """Collect valid (time_µs, mass) pairs from the UI rows."""
+        unit = self._unit_combo.currentText()
+        factor = self._UNIT_TO_US.get(unit, 1.0)
+        pairs = []
+        for row in self._pair_rows:
+            t = row["time_spin"].value()
+            m = row["mass_spin"].value()
+            if t > 0 and m > 0:
+                pairs.append((t * factor, m))
+        return pairs
+
+    def _export_reference(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export ToF Reference",
+            settings.value("tof2mass/ref_dir", ""),
+            "ToF reference files (*.tof2mass);;All files (*)")
+        if not path:
+            return
+        if not path.lower().endswith(".tof2mass"):
+            path += ".tof2mass"
+        settings.setValue("tof2mass/ref_dir", os.path.dirname(path))
+
+        unit = self._unit_combo.currentText()
+        pairs = [(row["time_spin"].value(), row["mass_spin"].value()) for row in self._pair_rows]
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# tof2mass_reference\n")
+            fh.write(f"# time_unit={unit}\n")
+            for t, m in pairs:
+                fh.write(f"{t}\t{m}\n")
+
+    def _import_reference(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import ToF Reference",
+            settings.value("tof2mass/ref_dir", ""),
+            "ToF reference files (*.tof2mass);;All files (*)")
+        if not path:
+            return
+        settings.setValue("tof2mass/ref_dir", os.path.dirname(path))
+
+        unit = None
+        pairs = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("# time_unit="):
+                        unit = line.split("=", 1)[1].strip()
+                    elif line.startswith("#"):
+                        continue
+                    else:
+                        parts = line.replace(",", "\t").split()
+                        if len(parts) >= 2:
+                                pairs.append((float(parts[0]), float(parts[1])))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        if not pairs:
+            QtWidgets.QMessageBox.warning(self, "Empty file",
+                "No valid (time, mass) pairs found in the file.")
+            return
+
+        # Apply time unit
+        if unit is not None:
+            idx = self._unit_combo.findText(unit)
+            if idx >= 0:
+                self._unit_combo.setCurrentIndex(idx)
+
+        # Rebuild pair rows to match the file exactly
+        # Remove all current rows (keep minimum of 2 in place, reuse them)
+        while len(self._pair_rows) < len(pairs):
+            self._add_pair_row()
+        while len(self._pair_rows) > len(pairs):
+            if len(self._pair_rows) <= 2:
+                break
+            self._remove_pair_row(self._pair_rows[-1])
+
+        for row, (t, m) in zip(self._pair_rows, pairs):
+            row["time_spin"].setValue(t)
+            row["mass_spin"].setValue(m)
+
+    @staticmethod
+    def _compute_ab(t_arr, m_arr):
+        """
+        Fit  t = a·√m + b  from arrays of times (µs) and masses (Da).
+        Returns (a, b, r2).  2 pairs → exact; ≥3 → least-squares.
+        """
+        sqrt_m = np.sqrt(m_arr)
+        A = np.column_stack([sqrt_m, np.ones(len(t_arr))])
+        if len(t_arr) == 2:
+            try:
+                ab = np.linalg.solve(A, t_arr)
+            except np.linalg.LinAlgError:
+                raise ValueError(
+                    "Cannot solve: the two mass values produce a singular system.\n"
+                    "Make sure the two reference masses are different.")
+            a, b = float(ab[0]), float(ab[1])
+        else:
+            result = np.linalg.lstsq(A, t_arr, rcond=None)
+            a, b = float(result[0][0]), float(result[0][1])
+
+        t_pred  = a * sqrt_m + b
+        ss_res  = float(np.sum((t_arr - t_pred) ** 2))
+        ss_tot  = float(np.sum((t_arr - t_arr.mean()) ** 2))
+        r2      = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+        return a, b, r2
+
+    def _solve(self):
+        pairs = self._get_pairs_us()
+        if len(pairs) < 2:
+            QtWidgets.QMessageBox.warning(
+                self, "Not enough pairs",
+                "Enter at least 2 valid (time, mass) pairs.")
+            return
+        t_arr = np.array([p[0] for p in pairs])
+        m_arr = np.array([p[1] for p in pairs])
+        try:
+            a, b, r2 = self._compute_ab(t_arr, m_arr)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Fit error", str(exc))
+            return
+        self._a  = a;  self._b  = b;  self._r2 = r2
+        self._a_spin.blockSignals(True); self._a_spin.setValue(a); self._a_spin.blockSignals(False)
+        self._b_spin.blockSignals(True); self._b_spin.setValue(b); self._b_spin.blockSignals(False)
+        self._r2_lbl.setText(f"{r2:.8f}")
+
+    # ── Transformation ────────────────────────────────────────────
+
+    @staticmethod
+    def _tof_to_mass_df(data_df, a, b):
+        """
+        Replace the 'mz' column (time) with mass values computed from
+            t = a·√m + b  →  m = ((t − b) / a)²
+        Rows where the inversion would yield negative sqrt are dropped.
+        """
+        t_arr   = data_df['mz'].values.astype(float)
+        sqrt_m  = (t_arr - b) / a
+        m_arr   = np.where(sqrt_m > 0, sqrt_m ** 2, np.nan)
+        out = data_df.copy()
+        out['mz'] = m_arr
+        out = out.dropna(subset=['mz'])
+        out = out[out['mz'] > 0].reset_index(drop=True)
+        return out
+
+    # ── Output folder ─────────────────────────────────────────────
+
+    def _browse_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Output Folder",
+            self._folder_edit.text() or settings.value("tof2mass/output_folder", ""))
+        if folder:
+            self._folder_edit.setText(folder)
+            settings.setValue("tof2mass/output_folder", folder)
+
+    # ── Apply ─────────────────────────────────────────────────────
+
+    def _apply(self):
+        out_folder = self._folder_edit.text().strip()
+        if not out_folder or not os.path.isdir(out_folder):
+            QtWidgets.QMessageBox.warning(
+                self, "No output folder", "Select a valid output folder first.")
+            return
+
+        if self._rb_current.isChecked():
+            self._apply_current(out_folder)
+        else:
+            # Batch: require that a and b have been solved/set
+            if self._a is None or self._b is None:
+                QtWidgets.QMessageBox.warning(
+                    self, "Not fitted",
+                    "Fit (or manually enter) a and b before batch processing.")
+                return
+            self._apply_batch(out_folder)
+
+    def _apply_current(self, out_folder):
+        """Fit from reference pairs, apply to current spectrum, save."""
+        if df is None or len(df) == 0:
+            QtWidgets.QMessageBox.warning(
+                self, "No spectrum", "Load a spectrum first.")
+            return
+        # Fit from the current reference pairs (individual fit for this spectrum)
+        pairs = self._get_pairs_us()
+        if len(pairs) < 2:
+            QtWidgets.QMessageBox.warning(
+                self, "Not enough pairs",
+                "Enter at least 2 valid (time, mass) pairs.")
+            return
+        t_arr = np.array([p[0] for p in pairs])
+        m_arr = np.array([p[1] for p in pairs])
+        try:
+            a, b, r2 = self._compute_ab(t_arr, m_arr)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.critical(self, "Fit error", str(exc))
+            return
+        # Honour manual overrides in the spin boxes
+        a  = self._a_spin.value() if self._a is not None else a
+        b  = self._b_spin.value() if self._b is not None else b
+        r2 = self._r2 if self._r2 is not None else r2
+
+        try:
+            result = self._tof_to_mass_df(df, a, b)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Transform error", str(exc))
+            return
+
+        src = combo.currentData() or combo.currentText() or ""
+        stem, ext = os.path.splitext(os.path.basename(src)) if src else ("spectrum", ".txt")
+        out_name = stem + "_mass_transformed" + (ext or ".txt")
+        out_path = os.path.join(out_folder, out_name)
+        src_sep  = _detect_file_sep(src) if src and os.path.isfile(src) else "\t"
+        unit     = self._unit_combo.currentText()
+        _write_tof_transformed(
+            result, out_path, src_path=src, sep=src_sep,
+            unit=unit, ref_times=t_arr, ref_masses=m_arr, a=a, b=b, r2=r2)
+
+        # Update the displayed fit values
+        self._a = a; self._b = b; self._r2 = r2
+        self._a_spin.blockSignals(True); self._a_spin.setValue(a); self._a_spin.blockSignals(False)
+        self._b_spin.blockSignals(True); self._b_spin.setValue(b); self._b_spin.blockSignals(False)
+        self._r2_lbl.setText(f"{r2:.8f}")
+
+        QtWidgets.QMessageBox.information(self, "Done", f"Saved to:\n{out_path}")
+
+    def _apply_batch(self, out_folder):
+        """Apply the fixed a and b (from UI) to every file in the batch folder."""
+        a  = self._a_spin.value()
+        b  = self._b_spin.value()
+        r2 = self._r2 if self._r2 is not None else float('nan')
+
+        pairs = self._get_pairs_us()
+        t_arr = np.array([p[0] for p in pairs]) if pairs else np.array([])
+        m_arr = np.array([p[1] for p in pairs]) if pairs else np.array([])
+        unit  = self._unit_combo.currentText()
+
+        files = _batch_select_input_files()
+        if not files:
+            return
+        n = len(files)
+        dlg = QtWidgets.QProgressDialog(
+            f"Processing 0 / {n}…", "Cancel", 0, n, self)
+        dlg.setWindowTitle("ToF → Mass Batch")
+        dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumWidth(340)
+        dlg.show()
+        errors = []
+        for i, path in enumerate(files):
+            if dlg.wasCanceled():
+                break
+            dlg.setLabelText(f"Processing {i+1} / {n}:  {os.path.basename(path)}")
+            dlg.setValue(i)
+            app.processEvents()
+            try:
+                raw  = read_spectrum_file(path, sep=get_sep_from_combo())
+                res  = self._tof_to_mass_df(raw, a, b)
+                stem, ext = os.path.splitext(os.path.basename(path))
+                out_name  = stem + "_mass_transformed" + (ext or ".txt")
+                out_path  = os.path.join(out_folder, out_name)
+                src_sep   = _detect_file_sep(path)
+                _write_tof_transformed(
+                    res, out_path, src_path=path, sep=src_sep,
+                    unit=unit, ref_times=t_arr, ref_masses=m_arr, a=a, b=b, r2=r2)
+            except Exception as exc:
+                errors.append(f"{os.path.basename(path)}: {exc}")
+        dlg.setValue(n)
+        dlg.close()
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                self, "Batch Errors",
+                f"{len(errors)} file(s) failed:\n" + "\n".join(errors[:10]))
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "Done",
+                f"Done.  {n} file(s) saved to:\n{out_folder}")
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        self._clear_triangles()
+        super().closeEvent(event)
+
+
+def _hsep():
+    """Return a thin horizontal separator line widget."""
+    line = QtWidgets.QFrame()
+    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+    line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+    return line
+
+
 def _batch_select_save_folder():
     folder = QtWidgets.QFileDialog.getExistingDirectory(
         main_win, "Select Output Folder", base_dir or "")
@@ -4716,6 +5365,26 @@ both_batch_action.triggered.connect(batch_both)
 normalize_current_action.triggered.connect(normalize_current)
 normalize_batch_action.triggered.connect(batch_normalize)
 
+_tof_to_mass_win_ref = [None]
+
+def _open_tof_to_mass_window():
+    global _tof_to_mass_win_ref
+    win = _tof_to_mass_win_ref[0]
+    if win is not None:
+        try:
+            if win.isVisible():
+                win.raise_()
+                win.activateWindow()
+                return
+        except RuntimeError:
+            pass
+    win = TofToMassWindow()
+    _tof_to_mass_win_ref[0] = win
+    win.show()
+    win.raise_()
+
+tof_to_mass_action.triggered.connect(_open_tof_to_mass_window)
+
 _residuals_viewer_ref = None
 def _open_residuals_viewer(res_folder=None):
     global _residuals_viewer_ref
@@ -4738,6 +5407,14 @@ view_residuals_action.triggered.connect(lambda: _open_residuals_viewer())
 # ─────────────────────────────────────────────
 #  OPT: Cache-aware highlight_peaks
 # ─────────────────────────────────────────────
+_OVERLAP_PEN_STYLES = [
+    QtCore.Qt.PenStyle.SolidLine,
+    QtCore.Qt.PenStyle.DashLine,
+    QtCore.Qt.PenStyle.DotLine,
+    QtCore.Qt.PenStyle.DashDotLine,
+    QtCore.Qt.PenStyle.DashDotDotLine,
+]
+
 def highlight_peaks(data_df, peaks, color_str, peak_label="Peak", alpha=255, bg_color_str='w'):
     color    = apply_alpha(color_str, alpha)
     bg_color = pg.mkColor(bg_color_str)
@@ -4749,8 +5426,13 @@ def highlight_peaks(data_df, peaks, color_str, peak_label="Peak", alpha=255, bg_
 
     geom_list = _get_highlight_geometry(data_df, peaks_flat)
     for (mz_arr, int_arr, mz_min, mz_max, peak_mz, peak_int) in geom_list:
+        overlap_count = sum(
+            1 for (ex_min, ex_max, _, _, _) in highlighted_ranges
+            if mz_min <= ex_max and mz_max >= ex_min
+        )
+        pen_style = _OVERLAP_PEN_STYLES[overlap_count % len(_OVERLAP_PEN_STYLES)]
         plot.plot(mz_arr, int_arr, pen=pg.mkPen(bg_color, width=3))
-        plot.plot(mz_arr, int_arr, pen=pg.mkPen(color,    width=3))
+        plot.plot(mz_arr, int_arr, pen=pg.mkPen(color, width=3, style=pen_style))
         highlighted_ranges.append(
             (mz_min, mz_max, peak_label, peak_mz, peak_int))
 
@@ -4927,7 +5609,7 @@ def _draw_auto_peaks(data_df, show_auto, threshold_value, show_masses_all=False,
                 text=str(int(round(mz))) if _si else f"{mz:.2f}",
                 anchor=(0.5, 1.0), angle=60,
                 color='w' if current_display == 'dark' else 'k')
-            y_log = np.log10(intensity) + 0.04 if intensity > 0 else 0
+            y_log = (np.log10(intensity) + 0.04 if intensity > 0 else 0) if _log_y else (intensity * 1.04)
             text_item.setPos(mz, y_log)
             plot.addItem(text_item)
             _label_text_items.append(text_item)
@@ -4940,7 +5622,10 @@ def _draw_auto_peaks(data_df, show_auto, threshold_value, show_masses_all=False,
     if len(pk_mz) == 0:
         return
 
-    y_offset = np.where(pk_int > 0, np.log10(pk_int) + 0.06, pk_int)
+    if _log_y:
+      y_offset = np.where(pk_int > 0, np.log10(pk_int) + 0.06, pk_int)
+    else:
+      y_offset = pk_int * 1.06
     _auto_peak_scatter = pg.ScatterPlotItem(
         x=pk_mz, y=y_offset, symbol='t', size=10,
         pen=pg.mkPen('r', width=1), brush=pg.mkBrush(255, 80, 80, 180))
@@ -5162,7 +5847,7 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
         sub.setLabel('left', name, size='9pt')
         # Stronger gridlines: higher alpha, both axes
         sub.showGrid(x=True, y=True, alpha=0.5)
-        sub.setLogMode(x=False, y=_stacked_log_y)
+        sub.setLogMode(x=False, y=_log_y)
         sub.setMenuEnabled(True)   # keep menu so "View All" / right-click works
 
         # Replace pyqtgraph's default multi-section context menu with a lean one
@@ -5197,7 +5882,7 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
                 x_min, x_max = float(mz_all.min()), float(mz_all.max())
                 pad = (x_max - x_min) * 0.02
                 _stacked_sub_plots[0].vb.setXRange(x_min - pad, x_max + pad, padding=0)
-                if not _stacked_log_y and all_int:
+                if not _log_y and all_int:
                     int_all = np.concatenate(all_int)
                     y_max = float(int_all.max())
                     pad_y = y_max * 0.05
@@ -5232,11 +5917,11 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
                     x, y = mp.x(), mp.y()
                     if crosshair_action.isChecked():
                         _vl.setPos(x); _hl.setPos(y)
-                    if _stacked_log_y:
+                    if _log_y:
                         y_disp = 10 ** y
-                        _lbl.setText(f"<span style='font-size:9pt'>m/z={x:.2f}  I={y_disp:.3e}</span>")
+                        _lbl.setText(f"<span style='font-size:9pt'>m/z={x:.4f}  I={y_disp:.3e}</span>")
                     else:
-                        _lbl.setText(f"<span style='font-size:9pt'>m/z={x:.2f}  I={y:.4f}</span>")
+                        _lbl.setText(f"<span style='font-size:9pt'>m/z={x:.4f}  I={y:.4f}</span>")
                 else:
                     _lbl.setText("")
             return _on_mouse
@@ -5296,7 +5981,7 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
             sigma3_floor = _estimate_noise_floor(int_vals, n_sigma=_sigma3_n_sigma)
             sigma3_floor = max(sigma3_floor, 1e-6)
             int_vals = np.clip(int_vals, sigma3_floor, None)
-        elif _stacked_log_y:
+        elif _log_y:
             sigma3_floor = 1e-6
             int_vals = np.clip(int_vals, sigma3_floor, None)
         else:
@@ -5315,7 +6000,7 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
         if _stacked_mirror:
             mirror_set = (0 if _stacked_mirror_odd else 1)  # which modulo to flip
             _mirror_this = (i % 2 == mirror_set)
-        if _stacked_log_y:
+        if _log_y:
             log_floor = np.log10(sigma3_floor) if sigma3_floor else -6
             if _mirror_this:
                 sub.vb.setYRange(0, log_floor, padding=0)
@@ -5589,7 +6274,16 @@ def _do_render_plot():
     # and the main plot is visible
     if _stacked_sub_plots:
         _destroy_stacked_layout()
+    # Re-draw ToF→Mass triangles that were cleared by plot.clear()
+    _w = _tof_to_mass_win_ref[0]
+    if _w is not None:
+      try:
+          if _w.isVisible():
+              _w._update_all_triangles()
+      except Exception:
+          pass
     plot.setVisible(True)
+    plot.setLogMode(x=False, y=_log_y)
 
     draw_df = df
     if do_sub:
@@ -6086,7 +6780,7 @@ def save_project_as():
         "sigma3_clip":     sigma3_clip_chk.isChecked(),
         "sigma3_n_sigma":  sigma3_slider.value() / 10.0,
         "stacked_mode":    stacked_mode_chk.isChecked(),
-        "stacked_log_y":   stacked_logy_chk.isChecked(),
+        "log_y":           stacked_logy_chk.isChecked(),
     }
 
     project["version"] = "1.0"
@@ -6258,7 +6952,7 @@ def open_project():
         sigma3_clip_chk.setChecked(view.get("sigma3_clip", False))
         sigma3_slider.setValue(int(view.get("sigma3_n_sigma", 1.0) * 10))
         stacked_mode_chk.setChecked(view.get("stacked_mode", False))
-        stacked_logy_chk.setChecked(view.get("stacked_log_y", False))
+        stacked_logy_chk.setChecked(view.get("log_y", False))
 
         # Restore zoom/pan
         xr = view.get("x_range")
@@ -7296,7 +7990,7 @@ def mouse_moved(pos):
     if plot.sceneBoundingRect().contains(pos):
         mp = plot.vb.mapSceneToView(pos)
         x = mp.x()
-        y = 10 ** mp.y() * 10**3
+        y = mp.y() # oiginal consideration with y = 10 ** mp.y() * 10**3 not needed anymore? Also broke with intensiies above 300.
         if crosshair_action.isChecked():
             v_line.setPos(x)
             h_line.setPos(mp.y())
@@ -7398,7 +8092,7 @@ _stacked_y_guard = False
 
 def _stacked_y_target():
     """Return the target (ymin, ymax) for the active stacked Y option, or None."""
-    if _stacked_log_y:
+    if _log_y:
         return None
     if _stacked_fit_y:
         if not _stacked_spectra_data:
@@ -10422,7 +11116,10 @@ class PlottingToolWindow(QtWidgets.QWidget):
         ymax   = ref_df["intensity"].max() if not ref_df.empty else 1.0
 
         # ── Collect spans + label info across all rows ───────────────────────
-        _span_entries = []  # (mz, label_text, hex_color)
+        _HATCH_PATTERNS = ['', '///', '\\\\\\', 'xxx', '...', '+++', 'ooo']
+
+        _span_entries   = []   # (mz, label_text, hex_color)
+        _drawn_spans    = []   # (lo, hi) of every span already drawn — for overlap detection
         half_w = self.peak_span_width_spin.value() / 2.0
         for row in custom_peak_rows:
             if not row["checkbox"].isChecked():
@@ -10436,10 +11133,15 @@ class PlottingToolWindow(QtWidgets.QWidget):
                 continue
             first = True
             for mz in peaks:
-                ax.axvspan(mz - half_w, mz + half_w,
+                lo, hi = mz - half_w, mz + half_w
+                overlap_count = sum(1 for (ex_lo, ex_hi) in _drawn_spans if lo <= ex_hi and hi >= ex_lo)
+                hatch = _HATCH_PATTERNS[overlap_count % len(_HATCH_PATTERNS)]
+                ax.axvspan(lo, hi,
                            color=hex_c, alpha=0.18,
+                           hatch=hatch,
                            label=row_label if first else "_nolegend_",
                            zorder=0)
+                _drawn_spans.append((lo, hi))
                 lbl_text = str(int(round(mz))) if self.label_integer_cb.isChecked() else f"{mz:.2f}"
                 _span_entries.append((mz, lbl_text, hex_c))
                 first = False

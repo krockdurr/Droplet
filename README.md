@@ -2,47 +2,41 @@
 
 **Interactive viewer for LILBID mass spectrometry data.**
 
-Droplet is a desktop application for loading, visualising, annotating, and processing LILBID (Laser-Induced Liquid Bead Ion Desorption) spectra. It supports peak annotation, baseline correction, automatic and manual mass recalibration, cluster detection, peak area integration, and publication-quality figure export - all in a single window.
+Droplet is a desktop application for loading, visualising, annotating, and processing LILBID (Laser-Induced Liquid Bead Ion Desorption) spectra. It supports peak annotation, baseline correction, automatic and manual mass recalibration, cluster detection, peak area integration, "Time of flight" to Mass unit conversion, and publication-quality figure export - all in a single window.
 
 ---
 
 ## Features
 
-| Category                | What it does                                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Visualisation**       | Linear / log-Y plot, dark and bright themes, stacked multi-spectrum view (with mirror, fit-Y, lock-Y options)                  |
-| **File handling**       | Load folders or individual files (`.txt`, `.csv`, `.tsv`, `.dat`, `.asc`); drag-and-drop; virtual folders; recent file history |
-| **Overlays**            | Up to 10 simultaneous overlay spectra, each with its own colour, polarity filter, and dt filter                                |
-| **Peak annotation**     | Named peak lists with per-row colours, undo/redo, import/export (JSON), click-to-pick mode                                     |
-| **Baseline correction** | airPLS (LILBID standard) and SNIP algorithms; single file or batch                                                             |
-| **Recalibration**       | Automatic (quadratic TOF polynomial) and manual (user-chosen anchor peaks); single file or batch                               |
-| **Normalisation**       | Max-normalise or normalise to a specific m/z; single file or batch                                                             |
-| **Batch normalize**     | Normalize entire folders at once                                                                                               |
-| **Cluster detection**   | Find regularly-spaced series of peaks (e.g. water/solvent clusters); peak-list mode; click-to-select clusters                  |
-| **Peak comparison**     | Highlight common and unique peaks across all visible spectra                                                                   |
-| **Peak area**           | Interactive range measurement, total spectrum area, per-peak-list area ratios, batch export, ratio modes                       |
-| **Minimap overlay**     | Thumbnail of the full spectrum with a viewport indicator for easy navigation                                                   |
-| **Zoom history**        | "Go to last zoom" context menu on the plot                                                                                     |
-| **Help system**         | Context-specific help dialogs for each feature area                                                                            |
-| **Tutorial**            | Interactive step-by-step tutorial (Help → Start Tutorial)                                                                      |
-| **Export**              | PNG, SVG, PDF, CSV; copy to clipboard; print                                                                                   |
-| **Plotting tool**       | Separate figure editor (Appearance, Peaks, Annotations, Legend tabs) for publication figures                                   |
-| **Residuals viewer**    | Browse Δm/z residual files produced by batch recalibration                                                                     |
-| **Session / project**   | Save and restore the full window state, including overlays and peak lists (`.drp` project files)                               |
+| Category                | What it does                                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Visualisation**       | Linear / log-Y plot (toggle applies to all view modes), dark and bright themes, stacked multi-spectrum view (with mirror, fit-Y, lock-Y options) |
+| **File handling**       | Load folders or individual files (`.txt`, `.csv`, `.tsv`, `.dat`, `.asc`); drag-and-drop; virtual folders; recent file history                   |
+| **Overlays**            | Up to 10 simultaneous overlay spectra, each with its own colour, polarity filter, and dt filter                                                  |
+| **Peak annotation**     | Named peak lists with per-row colours, undo/redo, import/export (JSON), click-to-pick mode                                                       |
+| **Baseline correction** | airPLS (LILBID standard) and SNIP algorithms; single file or batch                                                                               |
+| **Recalibration**       | Automatic (quadratic TOF polynomial) and manual (user-chosen anchor peaks); single file or batch                                                 |
+| **Normalisation**       | Max-normalise or normalise to a specific m/z; single file or batch                                                                               |
+| **Batch normalize**     | Normalize entire folders at once                                                                                                                 |
+| **Cluster detection**   | Find regularly-spaced series of peaks (e.g. water/solvent clusters); peak-list mode; click-to-select clusters                                    |
+| **Peak comparison**     | Highlight common and unique peaks across all visible spectra                                                                                     |
+| **Peak area**           | Interactive range measurement, total spectrum area, per-peak-list area ratios, batch export, ratio modes                                         |
+| **Minimap overlay**     | Thumbnail of the full spectrum with a viewport indicator for easy navigation                                                                     |
+| **Zoom history**        | "Go to last zoom" context menu on the plot                                                                                                       |
+| **Help system**         | Context-specific help dialogs for each feature area                                                                                              |
+| **Tutorial**            | Interactive step-by-step tutorial (Help → Start Tutorial)                                                                                        |
+| **Export**              | PNG, SVG, PDF, CSV; copy to clipboard; print                                                                                                     |
+| **Plotting tool**       | Separate figure editor (Appearance, Peaks, Annotations, Legend tabs) for publication figures                                                     |
+| **Residuals viewer**    | Browse Δm/z residual files produced by batch recalibration                                                                                       |
+| **Session / project**   | Save and restore the full window state, including overlays and peak lists (`.drp` project files)                                                 |
 
 ---
 
-## New in v2.6.2
+## New in v2.6.4
 
-- **Minimap overlay**: thumbnail of the full spectrum with viewport indicator in the corner of the plot
-- **Zoom history**: "Go to last zoom" context menu on the plot
-- **Batch normalize**: normalize entire folders at once from the Processing menu
-- **Enhanced manual recalibration**: new PeakReviewWindow with grouped peaks, sliders, SNR filtering, and zoom-to-peak button
-- **Help system**: context-specific help dialogs for each feature area
-- **Tutorial**: interactive step-by-step tutorial (Help → Start Tutorial)
-- **Stacked mode enhancements**: mirror, fit-Y, lock-Y options
-- **Cluster detection**: peak-list mode, improved UI with click-to-select clusters
-- **Peak area**: batch export, ratio modes (between lists / normalized by global area), spectrum header preservation in exported CSV files
+- **ToF → Mass Converter**: new Processing menu tool to transform time-of-flight spectra to mass spectra via t = a√m + b; fit from ≥ 2 reference (time, mass) pairs; live red-triangle markers on the plot; nudge sliders; importable / exportable `.tof2mass` reference files; single-file or batch processing with transformation parameters saved in output file headers
+- **Log Y toggle extended**: the Log Y checkbox now applies to all viewing modes (single-spectrum, overlay) in addition to stacked mode
+- **Overlapping highlight patterns**: when two peak lists highlight the same m/z region, each subsequent list uses a different line style (dash, dot, …) on the main plot and a different hatch pattern in the matplotlib export so all lists remain visually distinguishable
 
 ---
 
@@ -141,7 +135,8 @@ droplet/
         ├── tutorial.py
         ├── manual_recal.py    (stub – class in app.py)
         ├── peak_review.py     (stub – class in app.py)
-        └── plotting_tool.py   (stub – class in app.py)
+        ├── plotting_tool.py   (stub – class in app.py)
+        └── tof_to_mass.py     (stub – TofToMassWindow class in app.py)
 ```
 
 ---
