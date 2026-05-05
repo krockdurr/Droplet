@@ -192,13 +192,13 @@ def _auto_select_polarity():
     pos_files = [p for p in all_txt_files if "pos" in os.path.basename(p)]
 
     if default_pol == "auto":
-        target = "neg" if neg_files else ("pos" if pos_files else "neg")
+        target = "neg" if neg_files else ("pos" if pos_files else "All")
     elif default_pol == "neg":
         # prefer neg, but switch to pos if neg has nothing
-        target = "neg" if neg_files else ("pos" if pos_files else "neg")
+        target = "neg" if neg_files else ("pos" if pos_files else "All")
     elif default_pol == "pos":
         # prefer pos, but switch to neg if pos has nothing
-        target = "pos" if pos_files else ("neg" if neg_files else "pos")
+        target = "pos" if pos_files else ("neg" if neg_files else "All")
     else:
         target = default_pol
 
@@ -4226,6 +4226,17 @@ class TofToMassWindow(QtWidgets.QWidget):
         root.addWidget(self._rb_batch)
 
         # ── Output folder ──────────────────────────────────────────
+        in_folder_row = QtWidgets.QHBoxLayout()
+        in_folder_row.addWidget(QtWidgets.QLabel("Input folder:"))
+        self._in_folder_edit = QtWidgets.QLineEdit()
+        self._in_folder_edit.setPlaceholderText("Select folder containing ToF files…")
+        self._in_folder_edit.setText(settings.value("tof2mass/input_folder", ""))
+        in_browse_btn = QtWidgets.QPushButton("Browse…")
+        in_browse_btn.clicked.connect(self._browse_input_folder)
+        in_folder_row.addWidget(self._in_folder_edit, 1)
+        in_folder_row.addWidget(in_browse_btn)
+        root.addLayout(in_folder_row)
+
         folder_row = QtWidgets.QHBoxLayout()
         folder_row.addWidget(QtWidgets.QLabel("Output folder:"))
         self._folder_edit = QtWidgets.QLineEdit()
@@ -4244,6 +4255,14 @@ class TofToMassWindow(QtWidgets.QWidget):
             "Filename: <original>_mass_transformed.<ext>")
         apply_btn.clicked.connect(self._apply)
         root.addWidget(apply_btn)
+
+    def _browse_input_folder(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Input Folder",
+            self._in_folder_edit.text() or settings.value("tof2mass/input_folder", ""))
+        if folder:
+            self._in_folder_edit.setText(folder)
+            settings.setValue("tof2mass/input_folder", folder)
 
     # ── Pair row management ────────────────────────────────────────
 
@@ -4673,8 +4692,22 @@ class TofToMassWindow(QtWidgets.QWidget):
         m_arr = np.array([p[1] for p in pairs]) if pairs else np.array([])
         unit  = self._unit_combo.currentText()
 
-        files = _batch_select_input_files()
+        in_folder = self._in_folder_edit.text().strip()
+        if not in_folder or not os.path.isdir(in_folder):
+            QtWidgets.QMessageBox.warning(
+                self, "No input folder", "Select a valid input folder first.")
+            return
+        settings.setValue("tof2mass/input_folder", in_folder)
+        _EXTS = (".txt", ".csv", ".tsv", ".dat", ".asc")
+        files = sorted(
+            os.path.join(root, f)
+            for root, _dirs, fnames in os.walk(in_folder)
+            for f in fnames
+            if f.lower().endswith(_EXTS)
+            and "_mass_transformed" not in f.lower())
         if not files:
+            QtWidgets.QMessageBox.warning(
+                self, "No files", f"No spectrum files found in:\n{in_folder}")
             return
         n = len(files)
         dlg = QtWidgets.QProgressDialog(
@@ -4683,7 +4716,8 @@ class TofToMassWindow(QtWidgets.QWidget):
         dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
         dlg.setMinimumWidth(340)
         dlg.show()
-        errors = []
+        errors  = []
+        log_rows = []   # (out_filename, a_used, b_used)  — one per successful file
         for i, path in enumerate(files):
             if dlg.wasCanceled():
                 break
@@ -4700,10 +4734,30 @@ class TofToMassWindow(QtWidgets.QWidget):
                 _write_tof_transformed(
                     res, out_path, src_path=path, sep=src_sep,
                     unit=unit, ref_times=t_arr, ref_masses=m_arr, a=a, b=b, r2=r2)
+                log_rows.append((out_name, a, b))
             except Exception as exc:
                 errors.append(f"{os.path.basename(path)}: {exc}")
-        dlg.setValue(n)
-        dlg.close()
+
+        # # ── Write batch log ────────────────────────────────────────
+        # if log_rows:
+        #     import datetime
+        #     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        #     log_name = f"tof2mass_batch_log_{ts}.txt"
+        #     log_path = os.path.join(out_folder, log_name)
+        #     ref_t_str = ",".join(f"{t:.6g}" for t in t_arr) if len(t_arr) else "—"
+        #     ref_m_str = ",".join(f"{m:.6g}" for m in m_arr) if len(m_arr) else "—"
+        #     with open(log_path, "w", encoding="utf-8") as fh:
+        #         fh.write("# tof2mass_batch_log\n")
+        #         fh.write(f"# date={datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        #         fh.write(f"# time_unit={unit}\n")
+        #         fh.write(f"# ref_times={ref_t_str}\n")
+        #         fh.write(f"# ref_masses={ref_m_str}\n")
+        #         fh.write(f"# r2={r2:.8f}\n" if r2 is not None and not np.isnan(r2) else "# r2=—\n")
+        #         fh.write("##########\n")
+        #         fh.write("filename\ta\tb\n")
+        #         for out_name, a_used, b_used in log_rows:
+        #             fh.write(f"{out_name}\t{a_used:.10g}\t{b_used:.10g}\n")
+
         if errors:
             QtWidgets.QMessageBox.warning(
                 self, "Batch Errors",
@@ -4711,7 +4765,9 @@ class TofToMassWindow(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.information(
                 self, "Done",
-                f"Done.  {n} file(s) saved to:\n{out_folder}")
+                f"Done.  {n} file(s) saved to:\n{out_folder}\n\nLog: {log_name}")
+        dlg.setValue(n)
+        dlg.close()
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
