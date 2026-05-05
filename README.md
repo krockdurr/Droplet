@@ -73,10 +73,10 @@ pip install -r requirements.txt
 ## Running
 
 ```bash
-python Droplet_v2.6.2.py
+python Droplet_v2.6.4.py
 ```
 
-On Windows you can also double-click `Droplet_v2.6.2.py` if Python is associated with `.py` files.
+On Windows you can also double-click `Droplet_v2.6.4.py` if Python is associated with `.py` files.
 
 ---
 
@@ -110,7 +110,7 @@ Filenames are expected to contain `neg` or `pos` for polarity filtering, and opt
 ## Project structure
 
 ```
-Droplet_v2.6.2.py          Entry point
+Droplet_v2.6.4.py          Entry point
 droplet/
 ├── app.py                 Main window, menus, render loop, all glue code
 ├── constants.py           Shared constants (colours, symbols, …)
