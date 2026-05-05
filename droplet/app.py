@@ -4446,6 +4446,11 @@ class TofToMassWindow(QtWidgets.QWidget):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("# tof2mass_reference\n")
             fh.write(f"# time_unit={unit}\n")
+            if self._a is not None:
+                fh.write(f"# a={self._a_spin.value():.10g}\n")
+                fh.write(f"# b={self._b_spin.value():.10g}\n")
+            if self._r2 is not None:
+                fh.write(f"# r2={self._r2:.8f}\n")
             for t, m in pairs:
                 fh.write(f"{t}\t{m}\n")
 
@@ -4460,6 +4465,7 @@ class TofToMassWindow(QtWidgets.QWidget):
 
         unit = None
         pairs = []
+        a = b = r2 = None
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:
@@ -4468,12 +4474,18 @@ class TofToMassWindow(QtWidgets.QWidget):
                         continue
                     if line.startswith("# time_unit="):
                         unit = line.split("=", 1)[1].strip()
+                    elif line.startswith("# a="):
+                        a = float(line.split("=", 1)[1].strip())
+                    elif line.startswith("# b="):
+                        b = float(line.split("=", 1)[1].strip())
+                    elif line.startswith("# r2="):
+                        r2 = float(line.split("=", 1)[1].strip())
                     elif line.startswith("#"):
                         continue
                     else:
                         parts = line.replace(",", "\t").split()
                         if len(parts) >= 2:
-                                pairs.append((float(parts[0]), float(parts[1])))
+                            pairs.append((float(parts[0]), float(parts[1])))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Import failed", str(exc))
             return
@@ -4498,9 +4510,15 @@ class TofToMassWindow(QtWidgets.QWidget):
                 break
             self._remove_pair_row(self._pair_rows[-1])
 
-        for row, (t, m) in zip(self._pair_rows, pairs):
-            row["time_spin"].setValue(t)
-            row["mass_spin"].setValue(m)
+        for row, (t, m) in zip(self._pair_rows, pairs):   
+            row["time_spin"].setValue(t)                                                                                                                                                            
+            row["mass_spin"].setValue(m)                  
+
+        if a is not None and b is not None:                                                                                                                                                         
+            self._a = a;  self._b = b;  self._r2 = r2
+            self._a_spin.blockSignals(True); self._a_spin.setValue(a); self._a_spin.blockSignals(False)                                                                                             
+            self._b_spin.blockSignals(True); self._b_spin.setValue(b); self._b_spin.blockSignals(False)
+            self._r2_lbl.setText(f"{r2:.8f}" if r2 is not None else "—")
 
     @staticmethod
     def _compute_ab(t_arr, m_arr):
