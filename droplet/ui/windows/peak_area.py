@@ -499,14 +499,18 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
                     total_area = 0.0
                     peak_details = []
                     for mz_nom in peaks:
-                        tol = get_tolerance(mz_nom)
-                        mask = (fdata['mz'] >= mz_nom - tol) & (fdata['mz'] <= mz_nom + tol)
-                        sub = fdata[mask]
-                        if len(sub) >= 2:
-                            peak_area = float(np.trapz(sub['intensity'].values, sub['mz'].values))
-                            peak_max  = float(sub['intensity'].max())
+                        bounds = find_peak_bounds(mz_all, corr_all, mz_nom, noise_floor=floor)
+                        if bounds is None:
+                            peak_details.append((mz_nom, 0.0, 0.0))
+                            continue
+                        mz_lo_bound, mz_hi_bound, _real_mz, peak_max = bounds
+                        mask    = (mz_all >= mz_lo_bound) & (mz_all <= mz_hi_bound)
+                        mz_sub  = mz_all[mask]
+                        int_sub = corr_all[mask]
+                        if len(mz_sub) >= 2:
+                            peak_area = float(np.trapz(int_sub, mz_sub))
                             total_area += peak_area
-                            peak_details.append((mz_nom, peak_max, peak_area))
+                            peak_details.append((mz_nom, float(peak_max), peak_area))
                         else:
                             peak_details.append((mz_nom, 0.0, 0.0))
                     results.append((label, color, peaks, peak_details, total_area))
