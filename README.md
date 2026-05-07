@@ -165,11 +165,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
   <img src="docs/images/stacked_mode.png" width="900">
 </p>
 
-## ### Plotting Tool
-
-```md
-![Plotting Tool](docs/images/plotting_tool.png)
-```
+## Plotting Tool
 
 <p align="center">
   <img src="docs/images/plotting_tool.png" width="900">
