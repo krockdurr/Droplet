@@ -1,46 +1,87 @@
 # Droplet
 
-**Interactive viewer for LILBID mass spectrometry data.**
+> Interactive desktop viewer and analysis toolkit for LILBID mass spectrometry data.
 
-Droplet is a desktop application for loading, visualising, annotating, and processing LILBID (Laser-Induced Liquid Bead Ion Desorption) spectra. It supports peak annotation, baseline correction, automatic and manual mass recalibration, cluster detection, peak area integration, "Time of flight" to Mass unit conversion, and publication-quality figure export - all in a single window.
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
+---
+
+## Why Droplet?
+
+Droplet provides a complete desktop workflow for LILBID mass spectrometry analysis in a single application:
+
+- Interactive spectrum exploration
+- Fast peak annotation and comparison
+- Batch recalibration and processing
+- Publication-quality plotting
+- Native desktop performance with PyQt6 + pyqtgraph
 
 ---
 
 ## Features
 
-| Category                | What it does                                                                                                                                     |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Visualisation**       | Linear / log-Y plot (toggle applies to all view modes), dark and bright themes, stacked multi-spectrum view (with mirror, fit-Y, lock-Y options) |
-| **File handling**       | Load folders or individual files (`.txt`, `.csv`, `.tsv`, `.dat`, `.asc`); drag-and-drop; virtual folders; recent file history                   |
-| **Overlays**            | Up to 10 simultaneous overlay spectra, each with its own colour, polarity filter, and dt filter                                                  |
-| **Peak annotation**     | Named peak lists with per-row colours, undo/redo, import/export (JSON), click-to-pick mode                                                       |
-| **Baseline correction** | airPLS (LILBID standard) and SNIP algorithms; single file or batch                                                                               |
-| **Recalibration**       | Automatic (quadratic TOF polynomial) and manual (user-chosen anchor peaks); single file or batch                                                 |
-| **Normalisation**       | Max-normalise or normalise to a specific m/z; single file or batch                                                                               |
-| **Batch normalize**     | Normalize entire folders at once                                                                                                                 |
-| **Cluster detection**   | Find regularly-spaced series of peaks (e.g. water/solvent clusters); peak-list mode; click-to-select clusters                                    |
-| **Peak comparison**     | Highlight common and unique peaks across all visible spectra                                                                                     |
-| **Peak area**           | Interactive range measurement, total spectrum area, per-peak-list area ratios, batch export, ratio modes                                         |
-| **Minimap overlay**     | Thumbnail of the full spectrum with a viewport indicator for easy navigation                                                                     |
-| **Zoom history**        | "Go to last zoom" context menu on the plot                                                                                                       |
-| **Help system**         | Context-specific help dialogs for each feature area                                                                                              |
-| **Tutorial**            | Interactive step-by-step tutorial (Help → Start Tutorial)                                                                                        |
-| **Export**              | PNG, SVG, PDF, CSV; copy to clipboard; print                                                                                                     |
-| **Plotting tool**       | Separate figure editor (Appearance, Peaks, Annotations, Legend tabs) for publication figures                                                     |
-| **Residuals viewer**    | Browse Δm/z residual files produced by batch recalibration                                                                                       |
-| **Session / project**   | Save and restore the full window state, including overlays and peak lists (`.drp` project files)                                                 |
+### Visualisation
+
+- Linear and log-Y plotting
+- Dark and bright themes
+- Stacked multi-spectrum view
+- Minimap overview overlay
+- Zoom history navigation
+- Publication-quality figure export
+
+### Analysis
+
+- Peak annotation and label tools
+- Isotopic envelope visualisation
+- Cluster detection
+- Peak comparison across spectra
+- Peak area integration
+- Residuals viewer
+
+### Processing
+
+- airPLS and SNIP baseline correction
+- Automatic and manual recalibration
+- Spectrum normalisation
+- ToF → mass conversion
+
+### Workflow
+
+- Drag-and-drop loading
+- Overlay management
+- Batch processing
+- Session/project save files (`.drp`)
+- Background update checking
+- Built-in updater utility
 
 ---
 
-## New in v2.6.4
+## Quick Start
 
-- **ToF → Mass Converter**: new Processing menu tool to transform time-of-flight spectra to mass spectra via t = a√m + b; fit from ≥ 2 reference (time, mass) pairs; live red-triangle markers on the plot; nudge sliders; importable / exportable `.tof2mass` reference files; single-file or batch processing with transformation parameters saved in output file headers
-- **Log Y toggle extended**: the Log Y checkbox now applies to all viewing modes (single-spectrum, overlay) in addition to stacked mode
-- **Overlapping highlight patterns**: when two peak lists highlight the same m/z region, each subsequent list uses a different line style (dash, dot, …) on the main plot and a different hatch pattern in the matplotlib export so all lists remain visually distinguishable
+```bash
+git clone https://github.com/krockdurr/Droplet.git
+cd Droplet
+
+python -m venv .venv
+
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+
+pip install -r requirements.txt
+
+python Droplet_v2.7.py
+```
 
 ---
 
-## Requirements
+## Installation
+
+### Requirements
 
 - Python ≥ 3.10
 - PyQt6 ≥ 6.4
@@ -50,21 +91,11 @@ Droplet is a desktop application for loading, visualising, annotating, and proce
 - pandas ≥ 2.0
 - matplotlib ≥ 3.7
 
----
-
-## Installation
+### Install from source
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/krockdurr/Droplet.git
 cd Droplet
-
-# 2. (Recommended) create a virtual environment
-python -m venv .venv
-source .venv/bin/activate      # macOS / Linux
-.venv\Scripts\activate         # Windows
-
-# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -73,14 +104,83 @@ pip install -r requirements.txt
 ## Running
 
 ```bash
-python Droplet_v2.6.4.py
+python Droplet_v2.7.py
 ```
 
-On Windows you can also double-click `Droplet_v2.6.4.py` if Python is associated with `.py` files.
+On Windows, `Droplet_v2.7.py` can also be launched directly by double-clicking if Python is associated with `.py` files.
 
 ---
 
-## Keyboard shortcuts
+## Updating
+
+```bash
+python updater.py
+```
+
+The updater:
+
+- checks the latest GitHub version
+- creates a backup
+- updates via `git pull` or ZIP download
+- optionally restarts Droplet
+
+---
+
+## Typical Workflow
+
+1. Load spectra
+2. Apply baseline correction
+3. Detect and annotate peaks
+4. Recalibrate masses
+5. Compare spectra or detect clusters
+6. Export publication-ready figures
+
+---
+
+## Latest Update (v2.7)
+
+Highlights:
+
+- Fully configurable peak-list legend
+- Redesigned cluster detection table
+- Improved stacked-mode rendering
+- Built-in updater and version checker
+- Improved label positioning and peak highlighting
+
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
+
+---
+
+## Screenshots
+
+### Main Viewer
+
+<p align="center">
+  <img src="docs/images/main_viewer.png" width="900">
+</p>
+
+### Stacked Mode
+
+<p align="center">
+  <img src="docs/images/stacked_mode.png" width="900">
+</p>
+
+## ### Plotting Tool
+
+```md
+![Plotting Tool](docs/images/plotting_tool.png)
+```
+
+<p align="center">
+  <img src="docs/images/plotting_tool.png" width="900">
+</p>
+
+---
+
+## Keyboard Shortcuts
+
+<details>
+<summary>Show shortcuts</summary>
 
 | Key                 | Action                            |
 | ------------------- | --------------------------------- |
@@ -89,7 +189,7 @@ On Windows you can also double-click `Droplet_v2.6.4.py` if Python is associated
 | `A`                 | Toggle peak area measurement mode |
 | `F5`                | Reload current file               |
 | `Ctrl+P`            | Open Peaks window                 |
-| `Ctrl+Shift+P`      | Add a new peak row                |
+| `Ctrl+Shift+P`      | Print                             |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo peak edits            |
 | `Ctrl+Scroll`       | Cycle through overlays            |
 | `Ctrl+↑` / `Ctrl+↓` | Cycle overlays up / down          |
@@ -97,60 +197,99 @@ On Windows you can also double-click `Droplet_v2.6.4.py` if Python is associated
 | `Ctrl+Shift+C`      | Copy plot to clipboard            |
 | `Ctrl+Q`            | Quit                              |
 
----
-
-## File format
-
-Droplet reads two-column text files (m/z  intensity) with any of the separators Tab, Comma, Semicolon, or Space. Comment lines starting with `#` are ignored. The separator is detected automatically, or can be overridden with the **Sep** dropdown.
-
-Filenames are expected to contain `neg` or `pos` for polarity filtering, and optionally `_dt<value>` for dt filtering (e.g. `20240101_sample_neg_dt071.txt`).
+</details>
 
 ---
 
-## Project structure
+## File Format
 
+<details>
+<summary>Supported spectrum formats</summary>
+
+Droplet reads two-column text files:
+
+```text
+m/z    intensity
 ```
-Droplet_v2.6.4.py          Entry point
+
+Supported separators:
+
+- Tab
+- Comma
+- Semicolon
+- Space
+
+Features:
+
+- Automatic separator detection
+- Comment lines beginning with `#`
+- Optional manual separator override
+
+Filename parsing supports:
+
+- polarity detection (`neg` / `pos`)
+- dt filtering (`_dt071`, etc.)
+
+Example:
+
+```text
+20240101_sample_neg_dt071.txt
+```
+
+</details>
+
+---
+
+## Project Structure
+
+<details>
+<summary>Source tree</summary>
+
+```text
+Droplet_v2.7.py
+VERSION
+updater.py
+test_suite.py
+
 droplet/
-├── app.py                 Main window, menus, render loop, all glue code
-├── constants.py           Shared constants (colours, symbols, …)
+├── app.py
+├── constants.py
 ├── io/
-│   ├── file_utils.py      Directory scanning, polarity / dt filtering
-│   └── spectrum_reader.py File parsing and writing (with header preservation)
 ├── processing/
-│   ├── baseline.py        airPLS, SNIP, Whittaker (pure algorithms)
-│   ├── normalization.py   Normalisation and noise-floor estimation
-│   ├── calibration.py     Auto- and manual-recalibration pipelines
-│   └── signal.py          Subtraction, tolerance helpers, pen utilities
 ├── analysis/
-│   ├── peaks.py           Peak detection, highlight geometry
-│   └── clusters.py        Cluster (regularly-spaced series) detection
 └── ui/
-    ├── widgets.py          Reusable Qt widget classes
-    └── windows/
-        ├── residuals_viewer.py
-        ├── peak_comparison.py
-        ├── peak_area.py
-        ├── cluster_detection.py
-        ├── tutorial.py
-        ├── manual_recal.py    (stub – class in app.py)
-        ├── peak_review.py     (stub – class in app.py)
-        ├── plotting_tool.py   (stub – class in app.py)
-        └── tof_to_mass.py     (stub – TofToMassWindow class in app.py)
 ```
 
----
-
-## Algorithms and credits
-
-- **Baseline correction (airPLS)** and **auto-recalibration** algorithms adapted from [LILBID_GUI](https://github.com/mumair5393/LILBID_GUI) by M. Umair (MIT licence).
-- Built with Python, PyQt6, pyqtgraph, NumPy, SciPy, pandas, and matplotlib.
+</details>
 
 ---
 
-## Licence
+## Documentation
 
-This project is released under the **MIT Licence** - see [`LICENSE`](LICENSE) for details.
+- [RELEASE_NOTES.md](RELEASE_NOTES.md)
+- [LICENSE](LICENSE)
 
-The baseline correction (airPLS) and auto-recalibration algorithms were adapted from
-[LILBID_GUI](https://github.com/mumair5393/LILBID_GUI) by M. Umair, also MIT-licensed.
+---
+
+## Algorithms and Credits
+
+- Baseline correction (airPLS) and auto-recalibration algorithms adapted from:
+  - https://github.com/mumair5393/LILBID_GUI
+
+Built with:
+
+- Python
+- PyQt6
+- pyqtgraph
+- NumPy
+- SciPy
+- pandas
+- matplotlib
+
+---
+
+## License
+
+Released under the MIT License.
+
+See [LICENSE](LICENSE) for details.

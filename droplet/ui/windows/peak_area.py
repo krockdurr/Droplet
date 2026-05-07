@@ -10,7 +10,8 @@ except ImportError:
     from pyqtgraph.Qt import QtWidgets, QtCore
 
 from droplet.analysis.peaks import parse_peaks_text
-from droplet.processing.signal import get_tolerance
+from droplet.processing.signal import find_peak_bounds
+from droplet.ui.mixins import StayOnTopMixin
 
 
 def _get_app():
@@ -21,7 +22,7 @@ def _get_app():
 _area_win_ref = None
 
 
-class PeakAreaWindow(QtWidgets.QWidget):
+class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Non-modal window combining:
       1. Interactive range-click area measurement (toggle-based)
@@ -39,6 +40,10 @@ class PeakAreaWindow(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
+
+        _mbar = QtWidgets.QMenuBar()
+        self._install_stay_on_top(_mbar)
+        root.setMenuBar(_mbar)
 
         # ── Section 1: Interactive range measurement ──────────────────
         range_box = QtWidgets.QGroupBox("Interactive range measurement  [A]")
@@ -104,28 +109,11 @@ class PeakAreaWindow(QtWidgets.QWidget):
         self._ratio_btn.clicked.connect(self._compute_ratios)
         ratio_lay.addWidget(self._ratio_btn)
 
-        self._export_ratios_btn = QtWidgets.QPushButton("Export ratios as CSV…")
-        self._export_ratios_btn.setToolTip("Export the last computed ratios to a CSV file.")
+        self._export_ratios_btn = QtWidgets.QPushButton("Export as CSV…")
+        self._export_ratios_btn.setToolTip("Export the computed ratios to a CSV file.")
         self._export_ratios_btn.clicked.connect(self._export_ratios_csv)
         ratio_lay.addWidget(self._export_ratios_btn)
         self._last_ratio_results = []   # cache for export
-
-        self._export_areas_btn = QtWidgets.QPushButton("Export pure peak areas as CSV…")
-        self._export_areas_btn.setToolTip(
-            "Save a CSV with: Peak list label, m/z, peak max intensity, peak area.\n"
-            "Pure corrected areas — no ratios.")
-        self._export_areas_btn.clicked.connect(self._export_pure_areas)
-        ratio_lay.addWidget(self._export_areas_btn)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self._save_peak_areas_btn = QtWidgets.QPushButton("Save peak areas (CSV)…")
-        self._save_peak_areas_btn.clicked.connect(self._save_peak_areas_csv)
-        btn_row.addWidget(self._save_peak_areas_btn)
-
-        self._export_ratios_btn2 = QtWidgets.QPushButton("Export ratios (CSV)…")
-        self._export_ratios_btn2.clicked.connect(self._export_ratios_csv)
-        btn_row.addWidget(self._export_ratios_btn2)
-        ratio_lay.addLayout(btn_row)
 
         self._batch_export_btn = QtWidgets.QPushButton("Batch export ratios for entire folder…")
         self._batch_export_btn.clicked.connect(self._batch_export_folder_ratios)
@@ -283,11 +271,20 @@ class PeakAreaWindow(QtWidgets.QWidget):
         self._ratio_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
 
     def _correct_spectrum(self, data):
-        """Returns: mz (np.array), corrected_intensity (np.array), floor (float)."""
+        """Returns: mz (np.array), corrected_intensity (np.array), floor (float).
+
+        Floor is 3-sigma clipped from the m/z >= 10.9 region only,
+        matching the interactive area tool in app.py.
+        """
         _a = _get_app()
+        MZ_THRESHOLD = 10.9
         mz = data['mz'].values
         intensity = data['intensity'].values
-        floor = _a._sigma3_floor(intensity)
+        mask_thr = mz >= MZ_THRESHOLD
+        if mask_thr.sum() >= 10:
+            floor = _a._estimate_noise_floor(intensity[mask_thr], n_sigma=3.0)
+        else:
+            floor = _a._DYN_CLIP_FLOOR
         corrected = intensity - floor
         corrected[corrected < 0] = 0.0
         return mz, corrected, floor
@@ -295,7 +292,7 @@ class PeakAreaWindow(QtWidgets.QWidget):
     def _compute_peak_list_areas(self, data):
         """Return list of (label, color, mz_list, peak_details, area) for toggled peak lists."""
         results = []
-        mz_all, corr_all, _ = self._correct_spectrum(data)
+        mz_all, corr_all, floor = self._correct_spectrum(data)
         for chk, row in self._pl_chks:
             if not chk.isChecked():
                 continue
@@ -307,41 +304,64 @@ class PeakAreaWindow(QtWidgets.QWidget):
             total_area = 0.0
             peak_details = []
             for mz_nom in peaks:
-                tol = get_tolerance(mz_nom)
-                mask = (data['mz'] >= mz_nom - tol) & (data['mz'] <= mz_nom + tol)
+                bounds = find_peak_bounds(mz_all, corr_all, mz_nom, noise_floor=floor)
+                if bounds is None:
+                    peak_details.append((mz_nom, 0.0, 0.0, mz_nom, mz_nom, mz_nom))
+                    continue
+                mz_lo_bound, mz_hi_bound, real_mz, peak_max = bounds
+                mask    = (mz_all >= mz_lo_bound) & (mz_all <= mz_hi_bound)
                 mz_sub  = mz_all[mask]
                 int_sub = corr_all[mask]
                 if len(mz_sub) >= 2:
                     peak_area = float(np.trapz(int_sub, mz_sub))
-                    peak_max  = float(int_sub.max())
                     total_area += peak_area
-                    peak_details.append((mz_nom, peak_max, peak_area))
+                    peak_details.append((mz_nom, float(peak_max), peak_area,
+                                         real_mz, mz_lo_bound, mz_hi_bound))
                 else:
-                    peak_details.append((mz_nom, 0.0, 0.0))
+                    peak_details.append((mz_nom, 0.0, 0.0, real_mz, mz_lo_bound, mz_hi_bound))
             results.append((label, color, peaks, peak_details, total_area))
         return results
 
-    def _save_peak_areas_csv(self):
-        """Save pure peak areas (no ratios) for each peak in toggled peak lists."""
-        data = self._get_selected_df()
-        if data is None or len(data) == 0:
-            QtWidgets.QMessageBox.warning(self, "No spectrum", "No spectrum selected or loaded.")
-            return
-        results = self._compute_peak_list_areas(data)
-        if not results:
-            QtWidgets.QMessageBox.warning(self, "No data", "No peak lists selected.")
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Peak Areas", "", "CSV Files (*.csv)")
-        if not path:
-            return
-        with open(path, 'w', newline='') as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["peak_list_label", "peak_mz", "peak_max_intensity", "peak_area"])
-            for label, color, peaks, peak_details, total_area in results:
-                for mz_nom, peak_max, peak_area in peak_details:
-                    writer.writerow([label, f"{mz_nom:.6f}", f"{peak_max:.6f}", f"{peak_area:.6f}"])
-        QtWidgets.QMessageBox.information(self, "Saved", f"Peak areas saved to:\n{path}")
+
+
+        #         tol = get_tolerance(mz_nom)
+        #         mz_lo_bound = mz_nom - tol
+        #         mz_hi_bound = mz_nom + tol
+        #         mask = (data['mz'] >= mz_lo_bound) & (data['mz'] <= mz_hi_bound)
+        #         mz_sub  = mz_all[mask]
+        #         int_sub = corr_all[mask]
+        #         if len(mz_sub) >= 2:
+        #             peak_area = float(np.trapz(int_sub, mz_sub))
+        #             peak_max  = float(int_sub.max())
+        #             real_mz   = float(mz_sub[int_sub.argmax()])
+        #             total_area += peak_area
+        #             peak_details.append((mz_nom, peak_max, peak_area, real_mz, mz_lo_bound, mz_hi_bound, tol))
+        #         else:
+        #             peak_details.append((mz_nom, 0.0, 0.0, mz_nom, mz_lo_bound, mz_hi_bound, tol))
+        #     results.append((label, color, peaks, peak_details, total_area))
+        # return results
+
+    # def _save_peak_areas_csv(self):
+    #     """Save pure peak areas (no ratios) for each peak in toggled peak lists."""
+    #     data = self._get_selected_df()
+    #     if data is None or len(data) == 0:
+    #         QtWidgets.QMessageBox.warning(self, "No spectrum", "No spectrum selected or loaded.")
+    #         return
+    #     results = self._compute_peak_list_areas(data)
+    #     if not results:
+    #         QtWidgets.QMessageBox.warning(self, "No data", "No peak lists selected.")
+    #         return
+    #     path, _ = QtWidgets.QFileDialog.getSaveFileName(
+    #         self, "Save Peak Areas", "", "CSV Files (*.csv)")
+    #     if not path:
+    #         return
+    #     with open(path, 'w', newline='') as fh:
+    #         writer = csv.writer(fh)
+    #         writer.writerow(["peak_list_label", "peak_mz", "peak_max_intensity", "peak_area"])
+    #         for label, color, peaks, peak_details, total_area in results:
+    #             for mz_nom, peak_max, peak_area in peak_details:
+    #                 writer.writerow([label, f"{mz_nom:.6f}", f"{peak_max:.6f}", f"{peak_area:.6f}"])
+    #     QtWidgets.QMessageBox.information(self, "Saved", f"Peak areas saved to:\n{path}")
 
     def _get_spectrum_headers(self, data_key):
         """Read the '#'-prefixed header lines from the currently selected spectrum file."""
@@ -411,15 +431,30 @@ class PeakAreaWindow(QtWidgets.QWidget):
             for hline in spec_headers:
                 fh.write(hline + '\n')
             fh.write(f"#ratio_kind={ratio_kind}\n")
+            if ratio_mode == "global":
+                fh.write("#mode_denom=global_spectrum_area\n")
+                fh.write(f"#global_spectrum_area={global_area}\n")
+            else:
+                fh.write("#mode_denom=max_peak_list_area\n")
+                fh.write(f"#max_peak_list_area={global_area}\n")
             fh.write("##########\n")
             writer = csv.writer(fh)
-            writer.writerow(["peak_list_label", "peak_mz", "peak_max_intensity",
-                              "peak_area", "ratio"])
+            writer.writerow([
+                "peak_list_label", "Reference mass", "Real peak mass", "window_lo", "window_hi", "tolerance (m/z)",
+                "peak_max_intensity", "peak_area",
+                "peak list ratio", "individual peak / mode area (full spectra or higher peak list area)",
+                "individual peak / peak list area",
+            ])
             for label, color, peaks, peak_details, total_area in results:
                 ratio_val = (total_area / global_area) if global_area > 0 else 0.0
-                for mz_nom, peak_max, peak_area in peak_details:
-                    writer.writerow([label, f"{mz_nom:.6f}", f"{peak_max:.6f}",
-                                     f"{peak_area:.6f}", f"{ratio_val:.6f}"])
+                for mz_nom, peak_max, peak_area, real_mz, mz_lo, mz_hi, tol in peak_details:
+                    indiv_mode = (peak_area / global_area) if global_area > 0 else 0.0
+                    indiv_pl   = (peak_area / total_area)  if total_area  > 0 else 0.0
+                    writer.writerow([
+                        label, f"{mz_nom:.6f}", f"{real_mz:.6f}", f"{mz_lo:.6f}", f"{mz_hi:.6f}", f"{tol:.6f}",
+                        f"{peak_max:.6f}", f"{peak_area:.6f}",
+                        f"{ratio_val:.6f}", f"{indiv_mode:.6f}", f"{indiv_pl:.6f}",
+                    ])
 
     def _batch_export_folder_ratios(self):
         """Compute and export ratios for every file in the current folder."""
@@ -502,36 +537,36 @@ class PeakAreaWindow(QtWidgets.QWidget):
             msg += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:10])
         QtWidgets.QMessageBox.information(self, "Batch Export Complete", msg)
 
-    def _export_pure_areas(self):
-        data = self._get_selected_df()
-        if data is None or len(data) == 0:
-            QtWidgets.QMessageBox.warning(self, "No data", "No spectrum selected.")
-            return
-        rows = []
-        for chk, row in self._pl_chks:
-            if not chk.isChecked(): continue
-            label  = row["label_input"].text().strip() or "Unnamed"
-            peaks  = parse_peaks_text(row["peaks_input"].text())
-            for mz_nom in peaks:
-                tol  = get_tolerance(mz_nom)
-                mask = (data['mz'] >= mz_nom - tol) & (data['mz'] <= mz_nom + tol)
-                sub  = data[mask]
-                if len(sub) < 2: continue
-                peak_max_int = float(sub['intensity'].max())
-                peak_area    = float(np.trapz(sub['intensity'].values, sub['mz'].values))
-                rows.append((label, mz_nom, peak_max_int, peak_area))
-        if not rows:
-            QtWidgets.QMessageBox.information(self, "No peaks", "No peaks found.")
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export Peak Areas", "", "CSV Files (*.csv)")
-        if not path: return
-        with open(path, "w", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["Peak list label", "m/z (nominal)", "Peak max intensity", "Peak area"])
-            for r in rows:
-                writer.writerow([r[0], f"{r[1]:.4f}", f"{r[2]:.6g}", f"{r[3]:.6g}"])
-        QtWidgets.QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
+    # def _export_pure_areas(self):
+    #     data = self._get_selected_df()
+    #     if data is None or len(data) == 0:
+    #         QtWidgets.QMessageBox.warning(self, "No data", "No spectrum selected.")
+    #         return
+    #     rows = []
+    #     for chk, row in self._pl_chks:
+    #         if not chk.isChecked(): continue
+    #         label  = row["label_input"].text().strip() or "Unnamed"
+    #         peaks  = parse_peaks_text(row["peaks_input"].text())
+    #         for mz_nom in peaks:
+    #             tol  = get_tolerance(mz_nom)
+    #             mask = (data['mz'] >= mz_nom - tol) & (data['mz'] <= mz_nom + tol)
+    #             sub  = data[mask]
+    #             if len(sub) < 2: continue
+    #             peak_max_int = float(sub['intensity'].max())
+    #             peak_area    = float(np.trapz(sub['intensity'].values, sub['mz'].values))
+    #             rows.append((label, mz_nom, peak_max_int, peak_area))
+    #     if not rows:
+    #         QtWidgets.QMessageBox.information(self, "No peaks", "No peaks found.")
+    #         return
+    #     path, _ = QtWidgets.QFileDialog.getSaveFileName(
+    #         self, "Export Peak Areas", "", "CSV Files (*.csv)")
+    #     if not path: return
+    #     with open(path, "w", newline="") as fh:
+    #         writer = csv.writer(fh)
+    #         writer.writerow(["Peak list label", "m/z (nominal)", "Peak max intensity", "Peak area"])
+    #         for r in rows:
+    #             writer.writerow([r[0], f"{r[1]:.4f}", f"{r[2]:.6g}", f"{r[3]:.6g}"])
+    #     QtWidgets.QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -12,8 +12,10 @@ try:
 except ImportError:
     from pyqtgraph.Qt import QtWidgets, QtCore
 
+from droplet.ui.mixins import StayOnTopMixin
 
-class ResidualsViewerWindow(QtWidgets.QDialog):
+
+class ResidualsViewerWindow(QtWidgets.QDialog, StayOnTopMixin):
     """
     Browse a Residuals folder and display:
       • Left panel  – dense residuals spectrum (original m/z vs Δm/z curve)
@@ -81,6 +83,11 @@ class ResidualsViewerWindow(QtWidgets.QDialog):
         body.addLayout(right_col, stretch=1)
 
         main_lay = QtWidgets.QVBoxLayout(self)
+
+        _mbar = QtWidgets.QMenuBar()
+        self._install_stay_on_top(_mbar)
+        main_lay.setMenuBar(_mbar)
+
         main_lay.addLayout(body)
 
         # ── Close button ─────────────────────────────────────────────────────

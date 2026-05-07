@@ -13,6 +13,7 @@
 import os
 import json
 import re
+from pathlib import Path
 import csv
 import io
 import concurrent.futures
@@ -53,13 +54,14 @@ import warnings
 warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 
-APP_VERSION = "2.6.4"
+APP_VERSION = "2.7"
 
 from droplet.ui.windows.residuals_viewer import ResidualsViewerWindow
 from droplet.ui.windows.cluster_detection import ClusterDetectionWindow
 from droplet.ui.windows.peak_comparison import PeakComparisonWindow
 from droplet.ui.windows.peak_area import PeakAreaWindow
 from droplet.ui.windows.tutorial import TutorialOverlay
+from droplet.processing.signal import get_tolerance, find_peak_bounds
 
 
 
@@ -296,6 +298,38 @@ default_peak_colors = [
 ]
 next_color_index = 0
 
+# Symbols available for peak-list legend entries (pyqtgraph symbol codes → display names)
+MARKER_SYMBOL_NAMES = {
+    "o":           "Circle ●",
+    "s":           "Square ■",
+    "t":           "Triangle ▲",
+    "t1":          "Triangle ▼",
+    "t2":          "Triangle ▶",
+    "t3":          "Triangle ◀",
+    "d":           "Diamond ◆",
+    "+":           "Plus +",
+    "x":           "Cross ×",
+    "p":           "Pentagon",
+    "h":           "Hexagon",
+    "star":        "Star ★",
+    "arrow_up":    "Arrow ↑",
+    "arrow_down":  "Arrow ↓",
+    "arrow_left":  "Arrow ←",
+    "arrow_right": "Arrow →",
+    "crosshair":   "Crosshair ⊕",
+}
+MARKER_SYMBOLS = list(MARKER_SYMBOL_NAMES.keys())
+
+# Current legend entries shared between dialog, plot render, and exports.
+# Each element: {"color": QColor, "label": str, "symbol": str|None, "col": int}
+_legend_entries: list = []
+
+# File used to persist the current legend entry list across sessions
+_LEGEND_ENTRIES_FILE = Path.home() / ".droplet" / "legend_current_entries.json"
+
+# Persistent on-screen peak-list legend item (None when hidden)
+_peak_legend = None
+
 # Must be set before QApplication is created
 # os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
@@ -408,8 +442,12 @@ _pw_splitter.setCollapsible(0, False)
 
 import_action   = QtWidgets.QAction("Import...",             peaks_win)
 export_action   = QtWidgets.QAction("Export...",             peaks_win)
+save_pl_action  = QtWidgets.QAction("Save",                  peaks_win)
+save_pl_action.setShortcut(QtGui.QKeySequence("Ctrl+S"))
+save_pl_action.setShortcutContext(QtCore.Qt.ShortcutContext.WindowShortcut)
 pw_file_menu.addAction(import_action)
 pw_file_menu.addAction(export_action)
+pw_file_menu.addAction(save_pl_action)
 pw_file_menu.addSeparator()
 unmount_menu    = pw_file_menu.addMenu("Unmount imported file…")
 # populated dynamically in _rebuild_unmount_menu()
@@ -608,6 +646,13 @@ label_overlap_action.setToolTip(
 label_overlap_action.toggled.connect(lambda v: (
     settings.setValue("label_stack_vertical", v), render_plot()))
 view_menu.addAction(label_overlap_action)
+view_menu.addSeparator()
+plot_title_action = QtWidgets.QAction("Show Plot Title Bar", main_win, checkable=True)
+plot_title_action.setChecked(settings.value("plot_title/show", False, type=bool))
+plot_title_action.setToolTip(
+    "Show the title bar below the tools row.\n"
+    "Auto-populates date, mode and dt from the filename.")
+view_menu.addAction(plot_title_action)
 
 crosshair_action.setChecked(True)
 
@@ -693,6 +738,14 @@ plot_menu.addAction(open_plot_tool_action)
 plot_menu.addSeparator()
 # ──────────────────────────────────────────────
 
+# ── Legend parameters (before export options) ──
+legend_params_action = QtWidgets.QAction("Legend parameters…", main_win)
+legend_params_action.setToolTip(
+    "Configure the peak list legend: labels, symbols, font, box, columns.\n"
+    "Changes are previewed live and applied to the plot and exports.")
+plot_menu.addAction(legend_params_action)
+plot_menu.addSeparator()
+
 export_png_action       = QtWidgets.QAction("Export as PNG…",            main_win)
 export_svg_action       = QtWidgets.QAction("Export as SVG…",            main_win)
 export_pdf_action       = QtWidgets.QAction("Export as PDF…",            main_win)
@@ -704,30 +757,47 @@ print_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
 plot_menu.addAction(export_png_action)
 plot_menu.addAction(export_svg_action)
 plot_menu.addAction(export_pdf_action)
+batch_export_plots_action = QtWidgets.QAction("Batch Export Plots…", main_win)
+batch_export_plots_action.setToolTip(
+    "Export one plot image per file in the current folder,\n"
+    "keeping the current zoom and peak-list settings.")
+plot_menu.addAction(batch_export_plots_action)
 plot_menu.addSeparator()
 plot_menu.addAction(copy_plot_action)
 plot_menu.addSeparator()
 plot_menu.addAction(print_action)
 plot_menu.addSeparator()
+# legend_font_spin removed — font is now set in the Legend parameters dialog
 
-# ── Legend font size - inline widget in Plot menu ──
-legend_font_spin = QtWidgets.QSpinBox()
-legend_font_spin.setRange(6, 48)
-legend_font_spin.setValue(int(settings.value("legend_font_pt", 11)))
-legend_font_spin.setSuffix(" pt")
-legend_font_spin.setFixedWidth(72)
-legend_font_spin.setToolTip(
-    "Font size of spectrum names in the on-screen legend.\n"
-    "Export always uses a proportionally scaled version of this value.")
-_legend_font_container = QtWidgets.QWidget()
-_legend_font_layout = QtWidgets.QHBoxLayout(_legend_font_container)
-_legend_font_layout.setContentsMargins(8, 2, 8, 2)
-_legend_font_layout.addWidget(QtWidgets.QLabel("Legend font:"))
-_legend_font_layout.addWidget(legend_font_spin)
-_legend_font_layout.addStretch()
-_legend_font_action = QtWidgets.QWidgetAction(main_win)
-_legend_font_action.setDefaultWidget(_legend_font_container)
-plot_menu.addAction(_legend_font_action)
+# ── Peak label font/angle widgets (added to the Peaks window, not here) ──
+label_font_spin = QtWidgets.QSpinBox()
+label_font_spin.setRange(4, 36)
+label_font_spin.setValue(int(settings.value("label_font_pt", 10)))
+label_font_spin.setSuffix(" pt")
+label_font_spin.setFixedWidth(68)
+label_font_spin.setToolTip("Font size for peak list and auto-peak labels on the plot.")
+label_font_spin.valueChanged.connect(lambda v: (settings.setValue("label_font_pt", v), render_plot()))
+
+label_angle_spin = QtWidgets.QSpinBox()
+label_angle_spin.setRange(0, 90)
+label_angle_spin.setValue(int(settings.value("label_angle_deg", 60)))
+label_angle_spin.setSuffix(" °")
+label_angle_spin.setFixedWidth(60)
+label_angle_spin.setToolTip("Rotation angle for peak labels (0 = horizontal, 90 = vertical).")
+label_angle_spin.valueChanged.connect(lambda v: (settings.setValue("label_angle_deg", v), render_plot()))
+
+label_altitude_spin = QtWidgets.QDoubleSpinBox()
+label_altitude_spin.setRange(-0.1, 1.0)
+label_altitude_spin.setSingleStep(0.02)
+label_altitude_spin.setDecimals(2)
+label_altitude_spin.setValue(float(settings.value("label_y_offset", 0.0)))
+label_altitude_spin.setFixedWidth(68)
+label_altitude_spin.setToolTip(
+    "Extra altitude for peak labels above the peak tip.\n"
+    "In log scale this is added to the log10 offset; in linear scale\n"
+    "it multiplies the peak intensity (0.0 = default, 0.1 = 10% higher).")
+label_altitude_spin.valueChanged.connect(
+    lambda v: (settings.setValue("label_y_offset", v), render_plot()))
 
 # ── Display ───────────────────────────────────
 display_menu  = menu_bar.addMenu("Display")
@@ -762,6 +832,24 @@ help_menu.addAction(about_action)
 help_menu.addAction(help_shortcuts_action)
 
 main_layout.setMenuBar(menu_bar)
+
+# ── Keep-open filter for menus with checkable items ──────────────────────────
+# By default Qt closes a menu as soon as any action is triggered.  This filter
+# intercepts the mouse-release event for checkable actions and consumes it so
+# the menu stays open — the user can toggle several options in one visit.
+class _KeepOpenFilter(QtCore.QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.MouseButtonRelease:
+            if isinstance(obj, QtWidgets.QMenu):
+                action = obj.activeAction()
+                if action and action.isCheckable():
+                    action.trigger()
+                    return True   # eat event → menu stays open
+        return super().eventFilter(obj, event)
+
+_keep_open_filter = _KeepOpenFilter()
+view_menu.installEventFilter(_keep_open_filter)
+display_menu.installEventFilter(_keep_open_filter)
 
 # ─────────────────────────────────────────────
 #  Folder path label
@@ -1199,6 +1287,61 @@ tools_row.addWidget(_view_mz_lower_spin)
 tools_row.addStretch()
 main_layout.addLayout(tools_row)
 
+# ── Plot title bar ────────────────────────────────────────────────────────────
+# Mimics the PlottingToolWindow header: main title + auto-parsed filename tokens
+# (date, mode, dt, sample) each editable.  Shown via View → Show Plot Title Bar.
+_TITLE_HEADER_KEYS = ["date", "mode", "dt", "sample"]
+
+_title_bar = QtWidgets.QWidget()
+_title_bar.setMaximumHeight(28)
+_tbl = QtWidgets.QHBoxLayout(_title_bar)
+_tbl.setContentsMargins(4, 1, 4, 1)
+_tbl.setSpacing(4)
+
+_plot_title_edit = QtWidgets.QLineEdit()
+_plot_title_edit.setPlaceholderText("Plot title…")
+_plot_title_edit.setMinimumWidth(140)
+_plot_title_edit.setToolTip("Main title displayed above the plot.")
+_plot_title_edit.setText(settings.value("plot_title/text", ""))
+_tbl.addWidget(_plot_title_edit)
+
+_sep1 = QtWidgets.QFrame(); _sep1.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+_sep1.setStyleSheet("color: #ccc;"); _tbl.addWidget(_sep1)
+
+_plot_header_edits: dict[str, QtWidgets.QLineEdit] = {}
+_TITLE_KEY_WIDTHS = {"date": 88, "mode": 38, "dt": 38, "sample": 110}
+for _hk in _TITLE_HEADER_KEYS:
+    _hl = QtWidgets.QLabel(f"{_hk}:")
+    _hl.setStyleSheet("color: gray; font-size: 10px;")
+    _tbl.addWidget(_hl)
+    _hed = QtWidgets.QLineEdit()
+    _hed.setFixedWidth(_TITLE_KEY_WIDTHS[_hk])
+    _hed.setPlaceholderText(_hk)
+    _hed.setStyleSheet("font-size: 10px;")
+    _hed.setToolTip(f"Auto-parsed from filename. Edit to override.")
+    _tbl.addWidget(_hed)
+    _plot_header_edits[_hk] = _hed
+
+_sep2 = QtWidgets.QFrame(); _sep2.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+_sep2.setStyleSheet("color: #ccc;"); _tbl.addWidget(_sep2)
+
+_tbl.addWidget(QtWidgets.QLabel("pt:"))
+_plot_title_size = QtWidgets.QSpinBox()
+_plot_title_size.setRange(6, 28)
+_plot_title_size.setValue(settings.value("plot_title/size", 11, type=int))
+_plot_title_size.setFixedWidth(46)
+_tbl.addWidget(_plot_title_size)
+
+_clear_title_btn = QtWidgets.QPushButton("✕")
+_clear_title_btn.setFixedSize(20, 20)
+_clear_title_btn.setFlat(True)
+_clear_title_btn.setToolTip("Clear title text and all header fields")
+_tbl.addWidget(_clear_title_btn)
+
+_tbl.addStretch()
+_title_bar.setVisible(settings.value("plot_title/show", False, type=bool))
+main_layout.addWidget(_title_bar)
+
 def _set_stacked_mode(val):
     global _stacked_mode
     _stacked_mode = val
@@ -1267,6 +1410,94 @@ main_layout.addWidget(status_bar)
 plot = plot_widget.addPlot()
 plot.setLabel('bottom', 'm/z')
 plot.setLabel('left',   'Intensity')
+
+# ── Plot title logic (needs plot to exist) ────────────────────────────────────
+
+def _apply_plot_title():
+    """Rebuild the pyqtgraph plot title from the title bar widgets."""
+    title  = _plot_title_edit.text().strip()
+    pt     = _plot_title_size.value()
+    pt_sub = max(6, pt - 2)
+    settings.setValue("plot_title/text", title)
+    settings.setValue("plot_title/size", pt)
+
+    header_parts = [
+        f"{k}={_plot_header_edits[k].text().strip()}"
+        for k in _TITLE_HEADER_KEYS
+        if _plot_header_edits[k].text().strip()
+    ]
+    subtitle = "  |  ".join(header_parts)
+
+    if title and subtitle:
+        html = (f"<span style='font-size:{pt}pt;font-weight:bold;'>{title}</span>"
+                f"  <span style='font-size:{pt_sub}pt;color:gray;'>{subtitle}</span>")
+    elif title:
+        html = f"<span style='font-size:{pt}pt;font-weight:bold;'>{title}</span>"
+    elif subtitle:
+        html = f"<span style='font-size:{pt_sub}pt;color:gray;'>{subtitle}</span>"
+    else:
+        html = ""
+
+    plot.setTitle(html or None)
+
+
+def _auto_populate_title_vars(path: str):
+    """Parse a spectrum file path and populate the header edit fields."""
+    if not path:
+        return
+    name = os.path.splitext(os.path.basename(path))[0]
+    vals: dict[str, str] = {}
+    # date  YYYY-MM-DD
+    _dm = re.match(r'(\d{4}-\d{2}-\d{2})', name)
+    if _dm: vals["date"] = _dm.group(1)
+    # mode
+    if "_neg_" in name: vals["mode"] = "neg"
+    elif "_pos_" in name: vals["mode"] = "pos"
+    # dt
+    _ddm = re.search(r'_dt(\d+)', name, re.IGNORECASE)
+    if _ddm: vals["dt"] = _ddm.group(1)
+    # sample — tokens between date and mode/dt suffix
+    _parts = name.split("_")
+    if len(_parts) > 2:
+        vals["sample"] = "_".join(_parts[1:max(2, len(_parts) - 4)])
+
+    for k in _TITLE_HEADER_KEYS:
+        ed = _plot_header_edits[k]
+        ed.blockSignals(True)
+        ed.setText(vals.get(k, ""))
+        ed.blockSignals(False)
+    _apply_plot_title()
+
+
+# Wire up all title-bar signals
+_plot_title_edit.textChanged.connect(lambda _: _apply_plot_title())
+_plot_title_size.valueChanged.connect(lambda _: _apply_plot_title())
+for _hed in _plot_header_edits.values():
+    _hed.textChanged.connect(lambda _: _apply_plot_title())
+
+def _clear_plot_title():
+    _plot_title_edit.blockSignals(True)
+    _plot_title_edit.setText("")
+    _plot_title_edit.blockSignals(False)
+    for k in _TITLE_HEADER_KEYS:
+        _plot_header_edits[k].blockSignals(True)
+        _plot_header_edits[k].setText("")
+        _plot_header_edits[k].blockSignals(False)
+    _apply_plot_title()
+
+_clear_title_btn.clicked.connect(_clear_plot_title)
+
+# Auto-populate header fields when the file selection changes
+combo.currentIndexChanged.connect(
+    lambda: _auto_populate_title_vars(combo.currentData() or ""))
+
+# View menu toggle wires up now that _title_bar exists
+plot_title_action.toggled.connect(lambda v: (
+    _title_bar.setVisible(v),
+    settings.setValue("plot_title/show", v)))
+
+# Apply saved title on startup
+_apply_plot_title()
 plot.setLogMode(x=False, y=_log_y)
 _grid_on = settings.value("main_grid", True, type=bool)
 plot.showGrid(x=_grid_on, y=_grid_on, alpha=0.3)
@@ -1427,6 +1658,7 @@ plot.vb.sigRangeChanged.connect(lambda vb, ranges: _on_view_range_changed())
 # highlighted_ranges entries: (mz_min, mz_max, label, peak_mz, peak_int)
 highlighted_ranges  = []
 _label_text_items   = []
+_peak_symbol_scatter_items = []   # ScatterPlotItems for "symbols on peaks" overlay
 _auto_peak_scatter  = None
 df           = None
 df_raw       = None
@@ -1512,11 +1744,15 @@ def _area_compute(mz_lo, mz_hi):
 
     raw_area = float(np.trapz(int_arr, mz_arr))
 
-    # Estimate the noise floor from the full spectrum (not just the window),
-    # using the classical 3-sigma detection threshold.  The floor is then
-    # treated as a flat baseline across the selected Δm/z interval.
-    full_intensity = df['intensity'].values  # df = currently displayed spectrum
-    noise_floor    = _estimate_noise_floor(full_intensity, n_sigma=3.0)
+    # Noise floor: 3-sigma clip from the m/z >= 10.9 region (matches PeakAreaWindow).
+    _MZ_THR       = 10.9
+    _full_mz      = df['mz'].values
+    _full_int     = df['intensity'].values
+    _thr_mask     = _full_mz >= _MZ_THR
+    noise_floor   = (
+        _estimate_noise_floor(_full_int[_thr_mask], n_sigma=3.0)
+        if _thr_mask.sum() >= 10 else _DYN_CLIP_FLOOR
+    )
     floor_area     = noise_floor * delta_mz
     corrected_area = max(0.0, raw_area - floor_area)
 
@@ -1549,9 +1785,9 @@ def _area_show_result(mz_lo, mz_hi):
     full_int = df['intensity'].values
     thr_mask = full_mz >= 10.9
     if thr_mask.sum() >= 2:
-        full_noise_floor = _estimate_noise_floor(full_int, n_sigma=3.0)
         full_mz_thr  = full_mz[thr_mask]
         full_int_thr = full_int[thr_mask]
+        full_noise_floor = _estimate_noise_floor(full_int_thr, n_sigma=3.0)
         full_raw   = float(np.trapz(full_int_thr, full_mz_thr))
         full_floor = full_noise_floor * (full_mz_thr[-1] - full_mz_thr[0])
         normalized_total_area_by_noise_floor = max(0.0, full_raw - full_floor)
@@ -1821,28 +2057,76 @@ def _get_highlight_geometry(data_df, peaks_flat):
     if key in _highlight_cache:
         return _highlight_cache[key]
 
+    mz_full  = data_df["mz"].values
+    int_full = data_df["intensity"].values
+
+    # ── Use zero-floor normalised intensities for bound finding ──────────────
+    # find_peak_bounds / peak_widths(rel_height=1.0) REQUIRES a baseline-clipped
+    # signal (its own docstring: "int_arr already clipped to 0").
+    # On raw data the surrounding valley sits at the (non-zero) baseline offset,
+    # so scipy measures all the way out to where the signal drops back to that
+    # high baseline — producing extremely wide bounds in linear-scale mode.
+    # After zero-floor normalisation the minimum is ≈ 0, valley = 0, and the
+    # measured width tightly follows the visible peak body in BOTH log and
+    # linear display modes.
+    # The raw int_full is still used for the curve y-values (so the drawn
+    # highlight follows the actual displayed spectrum).
+    norm_int = normalise_cached(data_df, zero_floor=True)["intensity"].values
+
+    _thr = mz_full >= 10.9
+    noise_floor = (
+        _estimate_noise_floor(norm_int[_thr], n_sigma=3.0)
+        if _thr.sum() >= 10 else _DYN_CLIP_FLOOR
+    )
+
     results = []
     for p in peaks_flat:
         shifted_p = p + peak_shift(p)
-        tol = get_tolerance(shifted_p); backward = 0.2
-        idx = ((data_df["mz"] >= shifted_p - backward) &
-               (data_df["mz"] <= shifted_p + tol))
-        if not idx.any():
-            continue
-        candidates  = data_df[idx]
-        max_idx     = candidates["intensity"].idxmax()
-        all_indices = candidates.index.to_numpy()
-        max_pos     = np.where(all_indices == max_idx)[0][0]
-        n = 10
-        start = max(0, max_pos - n); end = min(len(candidates), max_pos + n + 1)
-        subset   = candidates.iloc[start:end]
-        mz_arr   = subset["mz"].to_numpy()
-        int_arr  = subset["intensity"].to_numpy()
-        peak_mz  = candidates.loc[max_idx, "mz"]
-        peak_int = candidates.loc[max_idx, "intensity"]
-        results.append((mz_arr, int_arr,
-                        subset["mz"].min(), subset["mz"].max(),
-                        peak_mz, peak_int))
+        coarse    = get_tolerance(shifted_p)
+
+        bounds = find_peak_bounds(mz_full, norm_int, shifted_p,
+                                  noise_floor=noise_floor, coarse_tol=coarse)
+
+        if bounds is not None:
+            mz_lo, mz_hi, _norm_peak_mz, _norm_peak_int = bounds
+            mask    = (mz_full >= mz_lo) & (mz_full <= mz_hi)
+            mz_arr  = mz_full[mask]
+            int_arr = int_full[mask]          # raw values — follow displayed curve
+            if len(mz_arr) < 2:
+                continue
+            # Re-derive peak position from the raw slice (same m/z, raw intensity)
+            _li     = int_arr.argmax()
+            peak_mz  = float(mz_arr[_li])
+            peak_int = float(int_arr[_li])
+        else:
+            # Fallback: narrow window + ±10-point slice
+            backward  = 0.2
+            idx_bool  = ((mz_full >= shifted_p - backward) &
+                         (mz_full <= shifted_p + coarse))
+            if not idx_bool.any():
+                continue
+            from scipy.signal import find_peaks as _fp
+            cand_mz   = mz_full[idx_bool]
+            cand_norm = norm_int[idx_bool]    # normalised — for peak detection
+            cand_raw  = int_full[idx_bool]    # raw — for curve y-values
+
+            local_peaks, _ = _fp(cand_norm,
+                                  height=noise_floor, prominence=noise_floor)
+            best = (local_peaks[cand_norm[local_peaks].argmax()]
+                    if len(local_peaks) > 0 else int(cand_norm.argmax()))
+
+            peak_mz  = float(cand_mz[best])
+            peak_int = float(cand_raw[best])
+            n        = 10
+            start    = max(0, best - n)
+            end      = min(len(cand_mz), best + n + 1)
+            mz_arr   = cand_mz[start:end]
+            int_arr  = cand_raw[start:end]
+            mz_lo    = float(mz_arr.min())
+            mz_hi    = float(mz_arr.max())
+
+        results.append((mz_arr, int_arr, mz_lo, mz_hi, peak_mz, peak_int))
+
     _highlight_cache[key] = results
     return results
 
@@ -2012,7 +2296,7 @@ def overlay_pen(color_str, alpha):
     c.setAlpha(alpha)
     return pg.mkPen(c, width=1)
 
-def get_tolerance(mz): return min(0.1 + 0.004 * mz, 0.8)
+# def get_tolerance(mz): return min(0.1 + 0.004 * mz, 0.8)
 def peak_shift(mz): return 0.0002 * mz
 def spectrum_display_name(path): return parse_lilbid_name(path) if path else "-"
 
@@ -2129,8 +2413,10 @@ def parse_peaks_text(text):
         return []
 
 
+from droplet.ui.mixins import StayOnTopMixin  # noqa: E402
 
-class ManualRecalWindow(QtWidgets.QWidget):
+
+class ManualRecalWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Non-modal window that shows peak rows with toggles.
     On "Detect Peaks" it pre-selects peaks on the main plot and
@@ -2160,6 +2446,7 @@ class ManualRecalWindow(QtWidgets.QWidget):
         fmenu.addAction(self._import_act)
         fmenu.addAction(self._export_act)
         root.setMenuBar(mbar)
+        self._install_stay_on_top(mbar, settings)
         self._import_act.triggered.connect(self._import_peaks)
         self._export_act.triggered.connect(self._export_peaks)
 
@@ -2655,7 +2942,7 @@ def _draw_manual_recal_scatter(mz_arr, int_arr):
 #  PEAK REVIEW WINDOW
 # ═════════════════════════════════════════════════════════════════════════════
 
-class PeakReviewWindow(QtWidgets.QWidget):
+class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Shows each pre-selected peak grouped by peak-list row.
     Each group has a header with a color swatch, label, and an all/none toggle.
@@ -2685,6 +2972,10 @@ class PeakReviewWindow(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
+
+        _mbar_prw = QtWidgets.QMenuBar()
+        self._install_stay_on_top(_mbar_prw, settings)
+        root.setMenuBar(_mbar_prw)
 
         hdr = QtWidgets.QLabel(
             "Peaks are grouped by peak list.  Each group header has an all/none toggle.\n"
@@ -3183,36 +3474,98 @@ class PeakReviewWindow(QtWidgets.QWidget):
             except:
                 pass
             self._peak_highlight_curve = None
+
+
+    def _find_real_peak(data_df, mz_centre, noise_floor, coarse_tol=0.4):
+        """
+        Return (mz, intensity) of the true local maximum nearest mz_centre,
+        or None if no real peak is found.
+
+        Uses scipy.signal.find_peaks so the result is a genuine local maximum,
+        not just the argmax (which grabs tails of large neighbours or noise).
+
+        prominence=noise_floor: the peak must rise above its surroundings by at
+        least the noise floor — this is what rejects bumps on declining tails.
+        """
+        from scipy.signal import find_peaks as _fp
+
+        mz_arr  = data_df['mz'].values
+        int_arr = data_df['intensity'].values
+
+        mask = (mz_arr >= mz_centre - coarse_tol) & (mz_arr <= mz_centre + coarse_tol)
+        if mask.sum() < 3:
+            return None
+
+        idxs      = np.where(mask)[0]
+        local_int = int_arr[idxs]
+
+        peaks, _ = _fp(local_int, height=noise_floor, prominence=noise_floor)
+
+        if len(peaks) > 0:
+            best = peaks[local_int[peaks].argmax()]
+        else:
+            # No proper local maximum above noise in this window
+            return None
+
+        gi = idxs[best]
+        return float(mz_arr[gi]), float(int_arr[gi])
     
+    # def _draw_peak_highlight(self, row_idx):
+    #     """Draw temporary yellow overlay around the selected peak"""
+    #     if row_idx >= len(self._detected):
+    #         return
+
+    #     mz_spin = self._mz_spins[row_idx].value()
+
+    #     if df is None or len(df) == 0:
+    #         return
+
+    #     # Use the same geometry function as highlight_peaks so the yellow overlay
+    #     # always lands on exactly the same region as the colored highlight curve.
+    #     geom = _get_highlight_geometry(df, [mz_spin])
+    #     if not geom:
+    #         return
+
+    #     mz_arr, int_arr = geom[0][0], geom[0][1]
+
+    #     if self._peak_highlight_curve is not None:
+    #         try:
+    #             plot.removeItem(self._peak_highlight_curve)
+    #         except Exception:
+    #             pass
+
+    #     self._peak_highlight_curve = plot.plot(
+    #         mz_arr, int_arr,
+    #         pen=pg.mkPen('#ffff00', width=4),
+    #         name="peak_highlight"
+    #     )
     def _draw_peak_highlight(self, row_idx):
-        """Draw temporary yellow overlay around the selected peak"""
         if row_idx >= len(self._detected):
             return
-
-        mz_spin = self._mz_spins[row_idx].value()
-
+        mz_detected = self._mz_spins[row_idx].value()
         if df is None or len(df) == 0:
             return
 
-        # Use the same geometry function as highlight_peaks so the yellow overlay
-        # always lands on exactly the same region as the colored highlight curve.
-        geom = _get_highlight_geometry(df, [mz_spin])
-        if not geom:
-            return
-
-        mz_arr, int_arr = geom[0][0], geom[0][1]
-
-        if self._peak_highlight_curve is not None:
-            try:
-                plot.removeItem(self._peak_highlight_curve)
-            except Exception:
-                pass
-
-        self._peak_highlight_curve = plot.plot(
-            mz_arr, int_arr,
-            pen=pg.mkPen('#ffff00', width=4),
-            name="peak_highlight"
+        mz_full  = df['mz'].values
+        int_full = df['intensity'].values
+        _thr     = mz_full >= 10.9
+        noise_floor = (
+          _estimate_noise_floor(int_full[_thr], n_sigma=3.0)
+          if _thr.sum() >= 10 else _DYN_CLIP_FLOOR
         )
+
+        result = _find_real_peak(df, mz_detected, noise_floor, coarse_tol=0.4)
+        if result is None:
+            return
+        real_mz, _ = result
+
+        # Simple fixed slice around the confirmed peak — no valley detection needed
+        tol  = get_tolerance(real_mz)
+        mask = (mz_full >= real_mz - tol) & (mz_full <= real_mz + tol)
+        mz_arr  = mz_full[mask]
+        int_arr = int_full[mask]
+        if len(mz_arr) < 2:
+            return
 
 
 
@@ -4090,7 +4443,7 @@ def _write_tof_transformed(data_df, out_path, src_path, sep,
             fh.write(f"{row.mz}{sep}{row.intensity}\n")
 
 
-class TofToMassWindow(QtWidgets.QWidget):
+class TofToMassWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Interactive ToF → Mass converter.
 
@@ -4177,6 +4530,7 @@ class TofToMassWindow(QtWidgets.QWidget):
         export_act.triggered.connect(self._export_reference)
         file_menu.addAction(import_act)
         file_menu.addAction(export_act)
+        self._install_stay_on_top(menu_bar, settings)
         root.setMenuBar(menu_bar)
 
         root.addWidget(_hsep())
@@ -5532,6 +5886,70 @@ threshold_mode_combo = QtWidgets.QComboBox()
 threshold_mode_combo.addItems(["% of max intensity", "SNR"])
 threshold_mode_combo.setMinimumWidth(40)
 
+def _clear_peak_symbol_scatters():
+    global _peak_symbol_scatter_items
+    for item in _peak_symbol_scatter_items:
+        try:
+            plot.removeItem(item)
+        except Exception:
+            pass
+    _peak_symbol_scatter_items.clear()
+
+
+def _draw_peak_symbols_on_plot():
+    """Draw legend symbols directly over each highlighted peak on the main plot."""
+    global _peak_symbol_scatter_items
+    _clear_peak_symbol_scatters()
+
+    if not settings.value("legend/symbols_on_peaks", False, type=bool):
+        return
+    if not settings.value("legend/use_symbols", False, type=bool):
+        return
+    if not _legend_entries:
+        return
+
+    # Build label -> {symbol, color} map from active legend entries
+    sym_map = {}
+    for entry in _legend_entries:
+        sym = entry.get("symbol")
+        if sym:
+            sym_map[entry.get("label", "")] = (sym, entry.get("color", QtGui.QColor("#888")))
+
+    if not sym_map:
+        return
+
+    sym_y_offset = settings.value("legend/symbol_y_offset", 0.0, type=float)
+    sym_size     = settings.value("legend/symbol_size", 10, type=int)
+
+    # Collect peak positions per (symbol, color) group
+    groups: dict[tuple, tuple[list, list]] = {}  # (sym, color_name) -> ([mz], [y])
+    for mz_min, mz_max, peak_label, peak_mz, peak_int in highlighted_ranges:
+        if peak_label not in sym_map:
+            continue
+        sym, color = sym_map[peak_label]
+        color_name = color.name() if isinstance(color, QtGui.QColor) else str(color)
+        key = (sym, color_name)
+        if key not in groups:
+            groups[key] = ([], [])
+        _pi = peak_int
+        if _log_y:
+            y = (np.log10(_pi) + sym_y_offset if _pi > 0 else 0)
+        else:
+            y = _pi * (1.0 + sym_y_offset)
+        groups[key][0].append(peak_mz)
+        groups[key][1].append(y)
+
+    for (sym, color_name), (xs, ys) in groups.items():
+        scatter = pg.ScatterPlotItem(
+            x=np.array(xs), y=np.array(ys),
+            symbol=sym, size=sym_size,
+            pen=pg.mkPen(color_name, width=1.2),
+            brush=pg.mkBrush(color_name),
+        )
+        plot.addItem(scatter)
+        _peak_symbol_scatter_items.append(scatter)
+
+
 def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
                       colored=False, font_size=1.0):
     global _label_text_items
@@ -5539,10 +5957,18 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
         try: plot.removeItem(item)
         except Exception: pass
     _label_text_items.clear()
-    if not show_labels and not show_masses: return
+    _clear_peak_symbol_scatters()
+    _any_row_override = any(
+        row.get("L_state", [0])[0] != 0 or row.get("1L_state", [0])[0] != 0
+        for row in custom_peak_rows
+    )
+    if not show_labels and not show_masses and not _any_row_override:
+        _draw_peak_symbols_on_plot()
+        return
 
-    BASE_PT = 10
-    MERGE_TOL = 0.5   # m/z units - peaks closer than this are merged
+    BASE_PT   = settings.value("label_font_pt",  10, type=int)
+    ANGLE     = settings.value("label_angle_deg", 60, type=int)
+    MERGE_TOL = 0.5
 
     # ── Group overlapping entries ──────────────────────────────────────────
     # Each group: (representative mid_mz, representative peak_mz, peak_int, [labels], [colors])
@@ -5586,16 +6012,56 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
                 "colors":   [color] if (colored and peak_label) else [],
             })
 
+    # ── Per-row L / 1L override table ────────────────────────────────────
+    # label -> (show_mass, show_label) for all peaks in that row
+    _row_all   = {}
+    # label -> (show_mass, show_label) for the first (min-mz) peak only
+    _row_first = {}
+    _row_first_mz = {}   # label -> minimum peak_mz seen in highlighted_ranges
+
+    for row in custom_peak_rows:
+        lbl    = row["label_input"].text().strip()
+        state  = row.get("L_state",  [0])[0]
+        fstate = row.get("1L_state", [0])[0]
+        if state  != 0:
+            _row_all[lbl]   = (state  in (1, 3), state  in (2, 3))
+        if fstate != 0:
+            _row_first[lbl] = (fstate in (1, 3), fstate in (2, 3))
+
+    for _, _, peak_label, peak_mz, _ in highlighted_ranges:
+        if peak_label in _row_first:
+            if peak_label not in _row_first_mz or peak_mz < _row_first_mz[peak_label]:
+                _row_first_mz[peak_label] = peak_mz
+
     # ── Draw one TextItem per group ────────────────────────────────────────
-    show_int = getattr(show_integers_toggle, 'isChecked', lambda: False)()
+    show_int      = getattr(show_integers_toggle, 'isChecked', lambda: False)()
+    label_y_extra = settings.value("label_y_offset", 0.0, type=float)
     for g in groups:
+        sm_list, sl_list, has_override = [], [], False
+        for lbl in g["labels"]:
+            if lbl in _row_all:
+                sm, sl = _row_all[lbl]
+                sm_list.append(sm); sl_list.append(sl); has_override = True
+            if lbl in _row_first:
+                fmz = _row_first_mz.get(lbl)
+                if fmz is not None and abs(g["peak_mz"] - fmz) < 0.01:
+                    sm, sl = _row_first[lbl]
+                    sm_list.append(sm); sl_list.append(sl); has_override = True
+
+        if has_override:
+            show_mass_this  = any(sm_list)
+            show_label_this = any(sl_list)
+        else:
+            show_mass_this  = show_masses
+            show_label_this = show_labels
+
         texts = []
-        if show_labels and g["labels"]:
+        if show_label_this and g["labels"]:
             if settings.value("label_stack_vertical", False, type=bool):
                 texts.extend(g["labels"])
             else:
                 texts.append(", ".join(g["labels"]))
-        if show_masses:
+        if show_mass_this:
             mz_val = g["peak_mz"]
             texts.append(str(int(round(mz_val))) if show_int else f"{mz_val:.2f}")
         if not texts:
@@ -5611,12 +6077,19 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
         font = QtGui.QFont()
         font.setPointSize(pt)
 
-        text_item = pg.TextItem(text="\n".join(texts), anchor=(0, 0.5), angle=60,
-                                color=label_color)
+        text_item = pg.TextItem(text="\n".join(texts), anchor=(0, 0.5), angle=ANGLE,
+                                  color=label_color)
         text_item.setFont(font)
-        text_item.setPos(g["mid_mz"], np.log10(g["peak_int"]) + 0.06 if g["peak_int"] > 0 else 0)
+        _pi = g["peak_int"]
+        if _log_y:
+            _y = (np.log10(_pi) + 0.06 + label_y_extra if _pi > 0 else 0)
+        else:
+            _y = _pi * (1.04 + label_y_extra)
+        text_item.setPos(g["peak_mz"], _y)
         plot.addItem(text_item)
         _label_text_items.append(text_item)
+
+    _draw_peak_symbols_on_plot()
 
 def _export_with_colored_labels(export_fn, export_scale=1.0):
     """Redraw peak labels in row colors at export scale, add export-only peaks legend, call export_fn(), then restore."""
@@ -5625,29 +6098,58 @@ def _export_with_colored_labels(export_fn, export_scale=1.0):
     mx = df['intensity'].max() if df is not None and len(df) > 0 else 1.0
     threshold_abs = (mass_threshold_spin.value() / 100.0) * mx
 
-    # ── Build export-only peak-rows legend ──────────────────────────
-    # Collect active peak rows that have a label and at least one peak
-    active_rows = [r for r in custom_peak_rows
-                   if r["checkbox"].isChecked()
-                   and r["label_input"].text().strip()
-                   and parse_peaks_text(r["peaks_input"].text())]
+    screen_pt = settings.value("legend/font_pt", 11, type=int)
+    export_pt = max(8, int(screen_pt * export_scale / 10))
 
-    peak_legend = None
+    # ── Scale the custom legend for export or build a fallback pg.LegendItem ─
+    # If the user has a configured PeakListLegendItem on screen (_peak_legend),
+    # scale its font up for the export and skip creating a second legend.
+    # Otherwise fall back to the pg.LegendItem (old behaviour).
+    _orig_legend_params = None
+    peak_legend  = None
     _dummy_curves = []
-    if active_rows:
-        screen_pt = legend_font_spin.value()
-        export_pt = max(8, int(screen_pt * export_scale / 10))  # scale relative to label scale
-        peak_legend = pg.LegendItem(offset=(-10, 10))   # top-right corner
-        peak_legend.setParentItem(plot.vb)
-        peak_legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 10))
-        peak_legend.setLabelTextSize(f"{export_pt}pt")
-        for row in active_rows:
-            color = row["color"][0].name()
-            label = row["label_input"].text().strip()
-            # Use a dummy PlotDataItem so LegendItem renders a colored line swatch
-            dummy = pg.PlotDataItem(pen=pg.mkPen(color, width=3))
-            peak_legend.addItem(dummy, label)
-            _dummy_curves.append(dummy)
+
+    if _peak_legend is not None and _legend_entries:
+        _orig_legend_params = dict(_peak_legend._params)
+        _exp_params = dict(_orig_legend_params)
+        _exp_params["font_pt"] = export_pt
+        _peak_legend.set_data(_legend_entries, _exp_params)
+    else:
+        # Fallback: build an export-only pg.LegendItem
+        active_rows = [r for r in custom_peak_rows
+                       if r["checkbox"].isChecked()
+                       and r["label_input"].text().strip()
+                       and parse_peaks_text(r["peaks_input"].text())]
+
+        if active_rows:
+            use_symbols = settings.value("legend/use_symbols", False, type=bool)
+            sym_for_label = {e["label"]: e.get("symbol") for e in _legend_entries}
+
+            peak_legend = pg.LegendItem(offset=(-10, 10))
+            peak_legend.setParentItem(plot.vb)
+            peak_legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 10))
+            peak_legend.setLabelTextSize(f"{export_pt}pt")
+
+            show_box = settings.value("legend/show_box", True, type=bool)
+            if not show_box:
+                peak_legend.opts["pen"]   = None
+                peak_legend.opts["brush"] = None
+
+            for row in active_rows:
+                color = row["color"][0].name()
+                label = row["label_input"].text().strip()
+                sym   = sym_for_label.get(label) if use_symbols else None
+                if sym:
+                    dummy = pg.PlotDataItem(
+                        pen=pg.mkPen(color, width=2),
+                        symbol=sym,
+                        symbolBrush=pg.mkBrush(color),
+                        symbolPen=pg.mkPen(color),
+                    )
+                else:
+                    dummy = pg.PlotDataItem(pen=pg.mkPen(color, width=3))
+                peak_legend.addItem(dummy, label)
+                _dummy_curves.append(dummy)
 
     # Redraw labels in color at export size
     _draw_peak_labels(show_lbl, show_masses, threshold_abs,
@@ -5655,7 +6157,9 @@ def _export_with_colored_labels(export_fn, export_scale=1.0):
     try:
         export_fn()
     finally:
-        # Remove export-only peak legend
+        # Restore legend to screen-size params
+        if _orig_legend_params is not None and _peak_legend is not None:
+            _peak_legend.set_data(_legend_entries, _orig_legend_params)
         if peak_legend is not None:
             try:
                 plot.vb.removeItem(peak_legend)
@@ -5679,10 +6183,14 @@ def _draw_auto_peaks(data_df, show_auto, threshold_value, show_masses_all=False,
         pk_mz_all, pk_int_all = _get_auto_peaks(data_df, threshold_value, mode)
         for mz, intensity in zip(pk_mz_all, pk_int_all):
             _si = show_integers_toggle.isChecked()
+            _angle = settings.value("label_angle_deg", 60, type=int)
+            _pt    = settings.value("label_font_pt",   10, type=int)
+            _font  = QtGui.QFont(); _font.setPointSize(_pt)
             text_item = pg.TextItem(
                 text=str(int(round(mz))) if _si else f"{mz:.2f}",
-                anchor=(0.5, 1.0), angle=60,
+                anchor=(0.5, 1.0), angle=_angle,
                 color='w' if current_display == 'dark' else 'k')
+            text_item.setFont(_font)
             y_log = (np.log10(intensity) + 0.04 if intensity > 0 else 0) if _log_y else (intensity * 1.04)
             text_item.setPos(mz, y_log)
             plot.addItem(text_item)
@@ -5733,14 +6241,32 @@ def _draw_envelope_lines(data_df):
         color = row["color"][0].name()
         tops_mz  = []
         tops_int = []
+        from scipy.signal import find_peaks as _fp
+        mz_full  = data_df['mz'].values
+        int_full = data_df['intensity'].values
+        _thr = mz_full >= 10.9
+        noise_floor = (
+          _estimate_noise_floor(int_full[_thr], n_sigma=3.0)
+          if _thr.sum() >= 10 else _DYN_CLIP_FLOOR
+        )
+
         for mz_nom in sorted(peaks):
-            # Find local maximum within ±1 Da of the nominal m/z
-            mask = (data_df['mz'] >= mz_nom - 1.0) & (data_df['mz'] <= mz_nom + 1.0)
-            sub = data_df[mask]
-            if sub.empty: continue
-            idx = sub['intensity'].idxmax()
-            tops_mz.append(float(sub.loc[idx, 'mz']))
-            tops_int.append(float(sub.loc[idx, 'intensity']))
+            shifted = mz_nom + peak_shift(mz_nom)
+            coarse  = get_tolerance(shifted)
+            mask    = (mz_full >= shifted - coarse) & (mz_full <= shifted + coarse)
+            if mask.sum() < 3:
+                continue
+            idxs      = np.where(mask)[0]
+            local_int = int_full[idxs]
+
+            local_peaks, _ = _fp(local_int, height=noise_floor, prominence=noise_floor)
+            best = (local_peaks[local_int[local_peaks].argmax()]
+                  if len(local_peaks) > 0
+                  else int(local_int.argmax()))
+
+            gi = idxs[best]
+            tops_mz.append(float(mz_full[gi]))
+            tops_int.append(float(int_full[gi]))
 
         if len(tops_mz) < 2: continue
         tops_mz  = np.array(tops_mz)
@@ -5754,6 +6280,68 @@ def _draw_envelope_lines(data_df):
                   symbolPen=pg.mkPen(color, width=1),
                   symbolBrush=pg.mkBrush(color))
 
+def _draw_stacked_envelope_lines(sub_plot, data_df, mz_vals, int_vals):
+    """
+    Draw isotopic envelope curves on a single stacked sub-plot.
+    Mirrors _draw_envelope_lines() but uses the zero-floor-normalised data so
+    peak tops are found on the same signal that is visually displayed,
+    and maps their y-positions to the doubly-normalised int_vals used for rendering.
+    Returns a list of plot items for later removal.
+    """
+    if data_df is None or len(data_df) == 0:
+        return []
+    created = []
+    from scipy.signal import find_peaks as _fp
+
+    norm_df  = normalise_cached(data_df, zero_floor=True)
+    norm_mz  = norm_df['mz'].values
+    norm_int = norm_df['intensity'].values
+
+    _thr = norm_mz >= 10.9
+    noise_floor = (
+        _estimate_noise_floor(norm_int[_thr], n_sigma=3.0)
+        if _thr.sum() >= 10 else _DYN_CLIP_FLOOR
+    )
+
+    for row in custom_peak_rows:
+        if not row["checkbox"].isChecked(): continue
+        if not row.get("envelope_btn") or not row["envelope_btn"].isChecked(): continue
+        peaks = parse_peaks_text(row["peaks_input"].text())
+        if len(peaks) < 2: continue
+
+        color    = row["color"][0].name()
+        tops_mz  = []
+        tops_int = []
+
+        for mz_nom in sorted(peaks):
+            shifted = mz_nom + peak_shift(mz_nom)
+            coarse  = get_tolerance(shifted)
+            mask    = (norm_mz >= shifted - coarse) & (norm_mz <= shifted + coarse)
+            if mask.sum() < 3: continue
+            idxs      = np.where(mask)[0]
+            local_int = norm_int[idxs]
+            local_peaks, _ = _fp(local_int,
+                                  height=noise_floor, prominence=noise_floor)
+            best = (local_peaks[local_int[local_peaks].argmax()]
+                    if len(local_peaks) > 0 else int(local_int.argmax()))
+            gi         = idxs[best]
+            peak_mz_r  = float(norm_mz[gi])
+            # Map to the doubly-normalised y-axis used for this sub-plot
+            bar_idx    = int(np.searchsorted(mz_vals, peak_mz_r).clip(0, len(int_vals) - 1))
+            tops_mz.append(peak_mz_r)
+            tops_int.append(float(int_vals[bar_idx]))
+
+        if len(tops_mz) < 2: continue
+        item = sub_plot.plot(
+            np.array(tops_mz), np.array(tops_int),
+            pen=pg.mkPen(color, width=2, style=QtCore.Qt.PenStyle.DashLine),
+            symbol='o', symbolSize=6,
+            symbolPen=pg.mkPen(color, width=1),
+            symbolBrush=pg.mkBrush(color))
+        created.append(item)
+    return created
+
+
 _stacked_sub_plots      = []
 _stacked_mouse_handlers = []
 _stacked_click_handlers = []
@@ -5763,24 +6351,46 @@ _stacked_peak_items     = []   # peak overlay items per sub-plot, for peak-only 
 def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items=False):
     """
     Draw peak highlights and labels onto a single stacked sub-plot.
-    Mirrors what render_plot does for the main plot, but targets sub_plot.
+    Mirrors _draw_peak_labels: respects per-row L / 1L button states and
+    the global peak-labels / peak-masses toggles.
     """
     show_lbl    = peak_labels_toggle.isChecked()
     show_masses = peak_masses_toggle.isChecked()
     show_int    = show_integers_toggle.isChecked()
     pk_alpha    = highlight_alpha()
     MERGE_TOL   = 0.5
-    BASE_PT     = 9
+    BASE_PT     = settings.value("label_font_pt", 9, type=int)
+    LABEL_ANGLE = settings.value("label_angle_deg", 60, type=int)
+    VERT_STACK  = settings.value("label_stack_vertical", False, type=bool)
 
     theme_color = 'w' if current_display == 'dark' else 'k'
     created_items = []
 
-    # Normalise intensity to [0,1] so positions match the sub-plot's Y axis
-    norm = normalise_cached(data_df, zero_floor=True)
-    norm_mz  = norm['mz'].values
-    norm_int = norm['intensity'].values
+    # ── Per-row L / 1L override table (mirrors _draw_peak_labels) ──────────
+    # State encoding: 0=off, 1=mass only, 2=label only, 3=mass+label
+    _row_all   = {}   # lbl -> (show_mass, show_label)  for every peak in the row
+    _row_first = {}   # lbl -> (show_mass, show_label)  for the first (lowest m/z) peak only
+    for row in custom_peak_rows:
+        if not row["checkbox"].isChecked():
+            continue
+        rlbl   = row["label_input"].text().strip() or "Custom peaks"
+        state  = row.get("L_state",  [0])[0]
+        fstate = row.get("1L_state", [0])[0]
+        if state  != 0:
+            _row_all[rlbl]   = (state  in (1, 3), state  in (2, 3))
+        if fstate != 0:
+            _row_first[rlbl] = (fstate in (1, 3), fstate in (2, 3))
+    _any_override = bool(_row_all or _row_first)
 
-    groups = []  # {mid_mz, peak_mz, peak_int, labels, colors}
+    # Track lowest m/z seen per label (needed for 1L "first peak" logic)
+    _first_mz: dict[str, float] = {}
+
+    # Normalise intensity to [0,1] so positions match the sub-plot's Y axis
+    norm     = normalise_cached(data_df, zero_floor=True)
+    norm_mz  = norm['mz'].values
+    norm_int = norm['intensity'].values   # noqa: F841 (kept for future use)
+
+    groups = []  # list of {peak_mz, peak_int, labels, colors}
 
     _foc_idx = _conf_focused_row_idx[0]
     for _ri, row in enumerate(custom_peak_rows):
@@ -5790,34 +6400,38 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
         if not peaks:
             continue
         color_str = row["color"][0].name()
-        lbl = row["label_input"].text().strip() or "Custom peaks"
-        _ralpha = pk_alpha if _foc_idx < 0 or _ri == _foc_idx else max(pk_alpha // 4, 15)
+        lbl       = row["label_input"].text().strip() or "Custom peaks"
+        _ralpha   = pk_alpha if _foc_idx < 0 or _ri == _foc_idx else max(pk_alpha // 4, 15)
 
         peaks_flat = []
-        for group in peaks:
-            if not isinstance(group, (list, tuple)):
-                group = [group]
-            peaks_flat.extend(group)
+        for grp in peaks:
+            if not isinstance(grp, (list, tuple)):
+                grp = [grp]
+            peaks_flat.extend(grp)
 
-        # Find the nearest m/z point in the normalised spectrum for each peak
         for peak_mz_target in peaks_flat:
-            idx = np.argmin(np.abs(norm_mz - peak_mz_target))
+            idx      = np.argmin(np.abs(norm_mz - peak_mz_target))
             peak_mz  = float(norm_mz[idx])
             peak_int = float(int_vals[idx])
 
-            # Draw a highlight bar on the sub-plot
+            # Track lowest m/z for 1L logic
+            if lbl not in _first_mz or peak_mz < _first_mz[lbl]:
+                _first_mz[lbl] = peak_mz
+
+            # Draw highlight bar — _get_highlight_geometry now uses zero-floor
+            # normalised data internally for bound finding, so no wrapper needed.
             geom_list = _get_highlight_geometry(data_df, [peak_mz_target])
-            for (mz_arr, int_arr, mz_min, mz_max, _pmz, _pint) in geom_list:
+            for (mz_arr, _int_arr, _mz_min, _mz_max, _pmz, _pint) in geom_list:
                 bg_color = pg.mkColor(theme_color)
                 hi_color = apply_alpha(color_str, _ralpha)
-                bar_idx = np.searchsorted(mz_vals, mz_arr).clip(0, len(int_vals) - 1)
+                bar_idx  = np.searchsorted(mz_vals, mz_arr).clip(0, len(int_vals) - 1)
                 norm_arr = int_vals[bar_idx]
                 sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(bg_color, width=3))
                 sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(hi_color, width=3))
             if return_items:
                 created_items.extend(sub_plot.listDataItems()[-2:])
 
-            # Merge nearby labels (same tolerance as the main plot)
+            # Merge nearby peaks into a single label group
             merged = False
             for g in groups:
                 if abs(g["peak_mz"] - peak_mz) <= MERGE_TOL:
@@ -5837,17 +6451,46 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
                     "colors":   [color_str],
                 })
 
-    # Draw one TextItem per group on this sub-plot
+    # ── Draw one TextItem per group ────────────────────────────────────────
     for g in groups:
         texts = []
-        if show_lbl and g["labels"]:
-            if settings.value("label_stack_vertical", False, type=bool):
-                texts.extend(g["labels"])
-            else:
-                texts.append(", ".join(g["labels"]))
-        if show_masses:
-            mz_val = g["peak_mz"]
-            texts.append(str(int(round(mz_val))) if show_int else f"{mz_val:.2f}")
+        g_mz  = g["peak_mz"]
+
+        if not _any_override:
+            # No per-row overrides — use global toggles only
+            if show_lbl and g["labels"]:
+                if VERT_STACK:
+                    texts.extend(g["labels"])
+                else:
+                    texts.append(", ".join(g["labels"]))
+            if show_masses:
+                texts.append(str(int(round(g_mz))) if show_int else f"{g_mz:.2f}")
+        else:
+            # Per-row L / 1L override logic (same as _draw_peak_labels)
+            show_mass_this = False
+            labels_this    = []
+            for rlbl in g["labels"]:
+                is_first = abs(g_mz - _first_mz.get(rlbl, g_mz)) < MERGE_TOL
+                if rlbl in _row_all:
+                    sm, sl = _row_all[rlbl]
+                else:
+                    sm, sl = show_masses, show_lbl
+                if is_first and rlbl in _row_first:
+                    fsm, fsl = _row_first[rlbl]
+                    sm = sm or fsm
+                    sl = sl or fsl
+                if sm:
+                    show_mass_this = True
+                if sl:
+                    labels_this.append(rlbl)
+            if labels_this:
+                if VERT_STACK:
+                    texts.extend(labels_this)
+                else:
+                    texts.append(", ".join(labels_this))
+            if show_mass_this:
+                texts.append(str(int(round(g_mz))) if show_int else f"{g_mz:.2f}")
+
         if not texts:
             continue
 
@@ -5858,13 +6501,21 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
         text_item = pg.TextItem(
             text="\n".join(texts),
             anchor=(0, 0.5),
-            angle=60,
+            angle=LABEL_ANGLE,
             color=label_color,
         )
         text_item.setFont(font)
-        # Y position: slightly above the normalised peak intensity
-        y_pos = g["peak_int"] + 0.05
-        text_item.setPos(g["peak_mz"], y_pos)
+
+        # Y position: match the same convention as _draw_peak_labels.
+        # In log mode the plot axis is in log10 space, so use log10(intensity)
+        # + a small offset; in linear mode simply scale slightly above the peak.
+        _pi = g["peak_int"]
+        if _log_y and _pi > 0:
+            y_pos = np.log10(_pi) + 0.06
+        else:
+            y_pos = _pi * 1.04
+
+        text_item.setPos(g_mz, y_pos)
         sub_plot.addItem(text_item)
         if return_items:
             created_items.append(text_item)
@@ -6102,15 +6753,22 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
         # Store data for peak-only redraws (so we don't need to re-normalise)
         _stacked_spectra_data.append((data_df, mz_vals, int_vals))
 
-        # ── Peak highlights and labels for this sub-plot ────────────
+        # ── Peak highlights, labels, and envelope curves for this sub-plot ──
         items = _draw_stacked_peak_labels(sub, data_df, mz_vals, int_vals,
                                           return_items=True)
-        _stacked_peak_items.append(items or [])
+        env_items = _draw_stacked_envelope_lines(sub, data_df, mz_vals, int_vals)
+        _stacked_peak_items.append((items or []) + env_items)
 
         _stacked_sub_plots.append(sub)
 
     plot.scene().sigMouseClicked.connect(_stacked_click_handler)
     _stacked_click_handlers.append(_stacked_click_handler)
+
+    # ── Peak-list legend on the top sub-plot ──────────────────────────
+    # Called here so the legend appears on the stacked view immediately.
+    # _rebuild_peak_legend_on_plot() detects stacked mode and anchors to
+    # the first sub-plot's viewbox instead of the hidden main plot.vb.
+    _rebuild_peak_legend_on_plot()
 
     _apply_stacked_y()
 
@@ -6241,6 +6899,11 @@ def _destroy_stacked_layout():
     plot.setVisible(True)
     plot_widget.ci.layout.activate()
     app.processEvents()
+
+    # Move the peak-list legend back to the main plot's viewbox now that
+    # the stacked sub-plots are gone.
+    _rebuild_peak_legend_on_plot()
+
     def _force_resize():
         sz = plot_widget.size()
         plot_widget.resize(sz.width(), sz.height() + 1)
@@ -6819,9 +7482,11 @@ def save_project_as():
     peaks = []
     for r in custom_peak_rows:
         entry = {
-            "checked": r["checkbox"].isChecked(),
-            "color":   r["color"][0].name(),
-            "label":   r["label_input"].text(),
+            "checked":  r["checkbox"].isChecked(),
+            "color":    r["color"][0].name(),
+            "label":    r["label_input"].text(),
+            "L_state":  r.get("L_state",  [0])[0],
+            "1L_state": r.get("1L_state", [0])[0],
         }
         if r.get("mode_btn") and r["mode_btn"].isChecked():
             entry["mode"]        = "range"
@@ -7002,6 +7667,12 @@ def open_project():
                 color=QtGui.QColor(item.get("color", "#ff0000")),
                 peaks_text=item.get("peaks", ""),
                 label_text=item.get("label", ""))
+        rd = custom_peak_rows[-1]
+        for key in ("L_state", "1L_state"):
+            v = item.get(key, 0)
+            if v:
+                rd[key][0] = v
+                rd["refresh_L"]() if key == "L_state" else rd["refresh_1L"]()
 
     update_pick_row_combo()
     _clear_highlight_cache()
@@ -7138,7 +7809,7 @@ peaks_rows_container = PeakRowsContainer()
 peaks_rows_scroll    = QtWidgets.QScrollArea()
 peaks_rows_scroll.setWidgetResizable(True)
 peaks_rows_scroll.setWidget(peaks_rows_container)
-peaks_rows_scroll.setMaximumHeight(320)
+# peaks_rows_scroll.setMaximumHeight(320)
 peaks_layout.addWidget(peaks_rows_scroll)
 
 def peaks_rows_layout_add(widget):    peaks_rows_container.add_row_widget(widget)
@@ -7174,14 +7845,13 @@ def _redraw_stacked_peaks_only():
                 pass
     _stacked_peak_items = []
 
-    # Redraw peaks on each sub-plot, collecting the new items
+    # Redraw peaks and envelope curves on each sub-plot
     for sub_idx, sub in enumerate(_stacked_sub_plots):
-        items_this_sub = _draw_stacked_peak_labels(sub,
-            _stacked_spectra_data[sub_idx][0],
-            _stacked_spectra_data[sub_idx][1],
-            _stacked_spectra_data[sub_idx][2],
-            return_items=True)
-        _stacked_peak_items.append(items_this_sub or [])
+        data_df, mz_vals, int_vals = _stacked_spectra_data[sub_idx]
+        items_this_sub = _draw_stacked_peak_labels(
+            sub, data_df, mz_vals, int_vals, return_items=True)
+        env_items = _draw_stacked_envelope_lines(sub, data_df, mz_vals, int_vals)
+        _stacked_peak_items.append((items_this_sub or []) + env_items)
 
 def _render_peaks_or_full():
     """Route peak row changes: peak-only redraw in stacked mode, full render otherwise."""
@@ -7219,7 +7889,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     def pick():
         chosen = QtWidgets.QColorDialog.getColor(row_color[0], peaks_win, "Pick a color")
         if chosen.isValid():
-            row_color[0] = chosen; update_btn(); render_plot()
+            row_color[0] = chosen; update_btn(); render_plot(); _rebuild_peak_legend_on_plot()
     btn.clicked.connect(pick); update_btn()
 
     # ── Mode toggle ──
@@ -7357,12 +8027,52 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     row_layout.addWidget(peaks_input)
     row_layout.addWidget(range_widget)
     row_layout.addWidget(label_input)
+
+    # ── Per-row label/mass cycle buttons ──
+    # State: 0=off, 1=mass only, 2=label only, 3=mass+label
+    _L_state  = [0]
+    _1L_state = [0]
+
+    _L_STYLES = {
+      0: ("L",   "border:1px solid gray; color:gray;"),
+      1: ("m",   "border:1px solid gray; background:#2d6e3e; color:white;"),
+      2: ("L",   "border:1px solid gray; background:#2d4a8a; color:white;"),
+      3: ("mL",  "border:1px solid gray; background:#8a5c2d; color:white;"),
+    }
+    _1L_STYLES = {
+      0: ("1L",  "border:1px solid gray; color:gray;"),
+      1: ("1m",  "border:1px solid gray; background:#2d6e3e; color:white;"),
+      2: ("1L",  "border:1px solid gray; background:#2d4a8a; color:white;"),
+      3: ("1mL", "border:1px solid gray; background:#8a5c2d; color:white;"),
+    }
+
+    L_btn  = QtWidgets.QPushButton("L");  L_btn.setFixedSize(28, 22)
+    lL_btn = QtWidgets.QPushButton("1L"); lL_btn.setFixedSize(32, 22)
+    L_btn.setToolTip("Cycle: off → mass → label → mass+label  (all peaks in this row)")
+    lL_btn.setToolTip("Cycle: off → mass → label → mass+label  (first/lowest-m/z peak only)")
+
+    def _refresh_L():
+        t, s = _L_STYLES[_L_state[0]];  L_btn.setText(t);  L_btn.setStyleSheet(s)
+    def _refresh_1L():
+        t, s = _1L_STYLES[_1L_state[0]]; lL_btn.setText(t); lL_btn.setStyleSheet(s)
+
+    def _cycle_L():
+        _L_state[0] = (_L_state[0] + 1) % 4; _refresh_L(); render_plot()
+    def _cycle_1L():
+        _1L_state[0] = (_1L_state[0] + 1) % 4; _refresh_1L(); render_plot()
+
+    L_btn.clicked.connect(_cycle_L)
+    lL_btn.clicked.connect(_cycle_1L)
+    _refresh_L(); _refresh_1L()
+
     zoom_btn = QtWidgets.QPushButton("⊙")
     zoom_btn.setFixedSize(22, 22)
     zoom_btn.setToolTip(
         "Zoom the plot to fit this peak list.\n"
         "Adjusts X range to span all peaks with padding.")
 
+    row_layout.addWidget(L_btn)
+    row_layout.addWidget(lL_btn)
     row_layout.addWidget(zoom_btn)
     row_layout.addWidget(envelope_btn)
     row_layout.addWidget(remove_btn)
@@ -7370,6 +8080,8 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     row_data = {"widget": row_widget, "checkbox": checkbox,
             "color": row_color, "peaks_input": peaks_input, "label_input": label_input,
             "mode_btn": mode_btn, "envelope_btn": envelope_btn, "zoom_btn": zoom_btn,
+            "L_state":  _L_state, "1L_state": _1L_state,
+            "refresh_L": _refresh_L, "refresh_1L": _refresh_1L,
             "range_start": range_start, "range_step": range_step, "range_end": range_end}
 
     def _zoom_to_this_row(_checked=False, _rd=row_data):
@@ -7406,6 +8118,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         to_idx = custom_peak_rows.index(row_data) if row_data in custom_peak_rows else -1
         if from_idx >= 0 and to_idx >= 0 and from_idx != to_idx:
             peaks_rows_container.move_row(from_idx, to_idx)
+            _rebuild_peak_legend_on_plot()
         event.acceptProposedAction()
 
     drag_handle.mousePressEvent = _handle_press
@@ -7417,16 +8130,16 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         custom_peak_rows.remove(row_data)
         peaks_rows_layout_remove(row_widget)
         _clear_highlight_cache()
-        update_pick_row_combo(); render_plot()
+        update_pick_row_combo(); render_plot(); _rebuild_peak_legend_on_plot()
         _sync_confirmation_panel()
 
     remove_btn.clicked.connect(on_remove)
-    checkbox.stateChanged.connect(lambda _: _render_peaks_or_full())
+    checkbox.stateChanged.connect(lambda _: (_render_peaks_or_full(), _rebuild_peak_legend_on_plot()))
     envelope_btn.toggled.connect(lambda _: render_plot())
     peaks_input.editingFinished.connect(push_peak_history)
     peaks_input.textChanged.connect(lambda _: _render_peaks_or_full())
     label_input.textChanged.connect(lambda _: update_pick_row_combo())
-    label_input.textChanged.connect(lambda _: _render_peaks_or_full())
+    label_input.textChanged.connect(lambda _: (_render_peaks_or_full(), _rebuild_peak_legend_on_plot()))
     custom_peak_rows.append(row_data)
     peaks_rows_layout_add(row_widget)
     return row_data
@@ -7460,8 +8173,9 @@ def _peak_history_load(path):
     _update_peaks_win_title(path)
     _update_peak_nav_buttons()
 
-def _load_peak_file_into_rows(path):
-    push_peak_history()
+def _load_peak_file_into_rows(path, push_history=True):
+    if push_history:
+        push_peak_history()
     for row in custom_peak_rows[:]:
         peaks_rows_layout_remove(row["widget"]); custom_peak_rows.remove(row)
     with open(path, "r") as f: data = json.load(f)
@@ -7482,6 +8196,12 @@ def _load_peak_file_into_rows(path):
                 color=QtGui.QColor(item.get("color", "#ff0000")),
                 peaks_text=item.get("peaks", ""),
                 label_text=item.get("label", ""))
+        rd = custom_peak_rows[-1]
+        for key in ("L_state", "1L_state"):
+            v = item.get(key, 0)
+            if v:
+                rd[key][0] = v
+                rd["refresh_L"]() if key == "L_state" else rd["refresh_1L"]()
     _clear_highlight_cache()
     update_pick_row_combo(); render_plot()
     _sync_confirmation_panel()
@@ -7578,11 +8298,45 @@ pw_pick_into_layout.addStretch()
 pw_pick_into_widget.setVisible(False)
 peaks_layout.addWidget(pw_pick_into_widget)
 
-# ── Label/mass toggles - two compact rows ──
+# ── Label/mass toggles + font/angle ──────────────────────────────────────
 pk_toggle_row1 = QtWidgets.QHBoxLayout()
 pk_toggle_row1.addWidget(peak_labels_toggle)
 pk_toggle_row1.addWidget(peak_masses_toggle)
+pk_toggle_row1.addSpacing(10)
+
+_lbl_font_lbl = QtWidgets.QLabel("Font:")
+_lbl_font_lbl.setStyleSheet("color: gray;")
+pk_toggle_row1.addWidget(_lbl_font_lbl)
+pk_toggle_row1.addWidget(label_font_spin)
+pk_toggle_row1.addSpacing(6)
+
+_lbl_angle_lbl = QtWidgets.QLabel("Angle:")
+_lbl_angle_lbl.setStyleSheet("color: gray;")
+pk_toggle_row1.addWidget(_lbl_angle_lbl)
+pk_toggle_row1.addWidget(label_angle_spin)
+pk_toggle_row1.addSpacing(6)
+
+_lbl_alt_lbl = QtWidgets.QLabel("Height:")
+_lbl_alt_lbl.setStyleSheet("color: gray;")
+_lbl_alt_lbl.setToolTip("Extra vertical offset above peak tip for labels.")
+pk_toggle_row1.addWidget(_lbl_alt_lbl)
+pk_toggle_row1.addWidget(label_altitude_spin)
 pk_toggle_row1.addStretch()
+
+reset_L_btn = QtWidgets.QPushButton("Reset L/1L")
+reset_L_btn.setFixedHeight(22)
+reset_L_btn.setToolTip("Set all L and 1L buttons back to off (state 0) for every peak row.")
+
+def _reset_all_L_states():
+    for row in custom_peak_rows:
+        for key, refresh_key in (("L_state", "refresh_L"), ("1L_state", "refresh_1L")):
+            if row.get(key) is not None:
+                row[key][0] = 0
+                row[refresh_key]()
+    render_plot()
+
+reset_L_btn.clicked.connect(_reset_all_L_states)
+pk_toggle_row1.addWidget(reset_L_btn)
 peaks_layout.addLayout(pk_toggle_row1)
 
 line = QtWidgets.QFrame()
@@ -7721,28 +8475,7 @@ def auto_load_peaks():
     if last_peak_file and os.path.exists(last_peak_file):
         try:
             _update_peaks_win_title(last_peak_file)
-            for row in custom_peak_rows[:]:
-                peaks_rows_layout_remove(row["widget"])
-                custom_peak_rows.remove(row)
-            with open(last_peak_file, "r") as f: data = json.load(f)
-            for item in data:
-                if item.get("mode") == "range":
-                    _add_peak_row_base(
-                        checked=item.get("checked", True),
-                        color=QtGui.QColor(item.get("color", "#ff0000")),
-                        label_text=item.get("label", ""),
-                        range_values=(
-                            item.get("range_start", 0.0),
-                            item.get("range_end",   0.0),
-                            item.get("range_step",  1.0),
-                        ))
-                else:
-                    _add_peak_row_base(
-                        checked=item.get("checked", True),
-                        color=QtGui.QColor(item.get("color", "#ff0000")),
-                        peaks_text=item.get("peaks", ""),
-                        label_text=item.get("label", ""))
-            update_pick_row_combo()
+            _load_peak_file_into_rows(last_peak_file, push_history=False)
         except Exception as e:
             QtWidgets.QMessageBox.warning(main_win, "Load Failed",
                 f"Failed to auto-load peaks from {last_peak_file}:\n{e}")
@@ -7756,27 +8489,16 @@ def _update_peaks_win_title(path=None):
     else:
         peaks_win.setWindowTitle("Peaks")
 
-def export_peak_list():
-    path, _ = QtWidgets.QFileDialog.getSaveFileName(
-        peaks_win, "Export Peak List", _get_dialog_dir("peak_list"), "JSON Files (*.json)")
-    if path: _set_dialog_dir("peak_list", path)
-
-    if not path:
-        return
-
-    # Ensure .json extension
-    if not path.lower().endswith(".json"):
-        path += ".json"
-
-    settings.setValue("last_peak_file", path)
-    _update_peaks_win_title(path)
-
+def _write_peak_list_to(path):
+    """Serialise current peak rows to *path* (must already have .json extension)."""
     data = []
     for r in custom_peak_rows:
         entry = {
-            "checked": r["checkbox"].isChecked(),
-            "color":   r["color"][0].name(),
-            "label":   r["label_input"].text(),
+            "checked":  r["checkbox"].isChecked(),
+            "color":    r["color"][0].name(),
+            "label":    r["label_input"].text(),
+            "L_state":  r.get("L_state",  [0])[0],
+            "1L_state": r.get("1L_state", [0])[0],
         }
         if r.get("mode_btn") and r["mode_btn"].isChecked():
             entry["mode"]        = "range"
@@ -7787,9 +8509,30 @@ def export_peak_list():
             entry["mode"]  = "manual"
             entry["peaks"] = r["peaks_input"].text()
         data.append(entry)
-
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+    settings.setValue("last_peak_file", path)
+    _update_peaks_win_title(path)
+
+
+def export_peak_list():
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        peaks_win, "Export Peak List", _get_dialog_dir("peak_list"), "JSON Files (*.json)")
+    if path: _set_dialog_dir("peak_list", path)
+    if not path:
+        return
+    if not path.lower().endswith(".json"):
+        path += ".json"
+    _write_peak_list_to(path)
+
+
+def save_peak_list():
+    """Save in-place; fall back to Export dialog if no file has been saved yet."""
+    path = settings.value("last_peak_file", "")
+    if path and os.path.isfile(path):
+        _write_peak_list_to(path)
+    else:
+        export_peak_list()
 
 def import_peak_list():
     path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -7827,10 +8570,12 @@ auto_load_peaks()
 # ─────────────────────────────────────────────
 def _snapshot_peaks():
     return {
-        "rows": [{"checked": r["checkbox"].isChecked(),
-                  "color":   r["color"][0].name(),
-                  "peaks":   r["peaks_input"].text(),
-                  "label":   r["label_input"].text()}
+        "rows": [{"checked":  r["checkbox"].isChecked(),
+                  "color":    r["color"][0].name(),
+                  "peaks":    r["peaks_input"].text(),
+                  "label":    r["label_input"].text(),
+                  "L_state":  r.get("L_state",  [0])[0],
+                  "1L_state": r.get("1L_state", [0])[0]}
                  for r in custom_peak_rows],
         "pick_row": pick_row_combo.currentIndex(),
     }
@@ -7855,6 +8600,11 @@ def _restore_snapshot(snapshot):
         row["label_input"].blockSignals(True)
         row["label_input"].setText(item.get("label", ""))
         row["label_input"].blockSignals(False)
+        for key in ("L_state", "1L_state"):
+            v = item.get(key, 0)
+            if row.get(key) is not None:
+                row[key][0] = v
+                row["refresh_L"]() if key == "L_state" else row["refresh_1L"]()
         for child in row["widget"].children():
             if isinstance(child, QtWidgets.QPushButton) and child.minimumWidth() == 22:
                 child.setStyleSheet(f"background-color: {c.name()}; border: 1px solid gray;"); break
@@ -8116,6 +8866,1104 @@ grid_action.toggled.connect(lambda checked: (
     settings.setValue("main_grid", checked),
     plot.showGrid(x=checked, y=checked, alpha=0.3)))
 
+
+
+def _save_legend_entries():
+    """Persist _legend_entries to disk so they survive dialog close/reopen and app restarts."""
+    try:
+        data = [
+            {
+                "color":  e["color"].name() if isinstance(e["color"], QtGui.QColor)
+                          else str(e.get("color", "#888")),
+                "label":  e.get("label", ""),
+                "symbol": e.get("symbol") or "",
+                "col":    e.get("col", 1),
+            }
+            for e in _legend_entries
+        ]
+        _LEGEND_ENTRIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _LEGEND_ENTRIES_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_legend_entries():
+    """Load _legend_entries from disk (called at startup)."""
+    global _legend_entries
+    if not _LEGEND_ENTRIES_FILE.exists():
+        return
+    try:
+        data = json.loads(_LEGEND_ENTRIES_FILE.read_text(encoding="utf-8"))
+        _legend_entries = [
+            {
+                "color":  QtGui.QColor(e.get("color", "#888888")),
+                "label":  e.get("label", ""),
+                "symbol": e.get("symbol") or None,
+                "col":    int(e.get("col", 1)),
+            }
+            for e in data
+        ]
+    except Exception:
+        pass
+
+
+def _rebuild_peak_legend_on_plot():
+    """
+    Rebuild the persistent on-screen peak-list legend from _legend_entries.
+    In stacked mode the legend is anchored to the first sub-plot's viewbox
+    so it appears at the top-right of the stacked layout rather than on the
+    hidden main plot.  In normal mode it is anchored to plot.vb as usual.
+    """
+    global _peak_legend
+    if _peak_legend is not None:
+        # Remove from whichever viewbox it currently lives in
+        for vb in ([plot.vb] + [s.vb for s in _stacked_sub_plots]):
+            try:
+                vb.removeItem(_peak_legend)
+            except Exception:
+                pass
+        _peak_legend = None
+
+    if not settings.value("legend/show", True, type=bool):
+        return
+    if not _legend_entries:
+        return
+
+    params = {
+        "font_pt":     settings.value("legend/font_pt",     11,    type=int),
+        "font_family": settings.value("legend/font_family", ""),
+        "show_box":    settings.value("legend/show_box",    True,  type=bool),
+        "shadow":      settings.value("legend/shadow",      False, type=bool),
+        "rounded":     settings.value("legend/rounded",     False, type=bool),
+        "ncols":       settings.value("legend/ncols",       1,     type=int),
+        "use_symbols": settings.value("legend/use_symbols", False, type=bool),
+        "dark_bg":     current_display == "dark",
+    }
+
+    _peak_legend = PeakListLegendItem()
+    _peak_legend.set_data(_legend_entries, params)
+
+    # In stacked mode anchor to the first (top) sub-plot so the legend
+    # floats over the entire stacked area; otherwise use the main plot.
+    if _stacked_mode and _stacked_sub_plots:
+        target_vb = _stacked_sub_plots[0].vb
+    else:
+        target_vb = plot.vb
+
+    _peak_legend.setParentItem(target_vb)
+    _peak_legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 10))
+
+
+class LegendEntryWidget(QtWidgets.QWidget):
+    """One row in the LegendParametersDialog entries list."""
+    changed = QtCore.pyqtSignal()
+
+    def __init__(self, color, label, show_symbol=False, symbol=None, parent=None):
+        super().__init__(parent)
+        self._color = color if isinstance(color, QtGui.QColor) else QtGui.QColor(color)
+
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(0, 1, 0, 1)
+        lay.setSpacing(4)
+
+        # Up / Down reorder buttons
+        up_btn = QtWidgets.QPushButton("▲")
+        up_btn.setFixedSize(18, 18)
+        up_btn.setFlat(True)
+        up_btn.clicked.connect(self._move_up)
+        down_btn = QtWidgets.QPushButton("▼")
+        down_btn.setFixedSize(18, 18)
+        down_btn.setFlat(True)
+        down_btn.clicked.connect(self._move_down)
+        lay.addWidget(up_btn)
+        lay.addWidget(down_btn)
+
+        # Color swatch button
+        self._swatch = QtWidgets.QPushButton()
+        self._swatch.setFixedSize(20, 20)
+        self._update_swatch()
+        self._swatch.clicked.connect(self._pick_color)
+        lay.addWidget(self._swatch)
+
+        # Symbol combo
+        self._sym_combo = QtWidgets.QComboBox()
+        self._sym_combo.addItem("None", None)
+        for code, name in MARKER_SYMBOL_NAMES.items():
+            self._sym_combo.addItem(name, code)
+        if symbol:
+            idx = self._sym_combo.findData(symbol)
+            if idx >= 0:
+                self._sym_combo.setCurrentIndex(idx)
+        self._sym_combo.setFixedWidth(120)
+        self._sym_combo.setVisible(show_symbol)
+        self._sym_combo.currentIndexChanged.connect(self.changed)
+        lay.addWidget(self._sym_combo)
+
+        # Label text
+        self._label_edit = QtWidgets.QLineEdit(label)
+        self._label_edit.setMinimumWidth(220)
+        self._label_edit.textChanged.connect(self.changed)
+        lay.addWidget(self._label_edit, 1)
+
+        # Column assignment — "col:" label before the spin
+        lay.addSpacing(6)
+        col_lbl = QtWidgets.QLabel("col:")
+        col_lbl.setStyleSheet("color: gray;")
+        lay.addWidget(col_lbl)
+        self._col_spin = QtWidgets.QSpinBox()
+        self._col_spin.setRange(1, 10)
+        self._col_spin.setValue(1)
+        self._col_spin.setFixedWidth(44)
+        self._col_spin.setToolTip("Column this entry belongs to")
+        self._col_spin.valueChanged.connect(self.changed)
+        lay.addWidget(self._col_spin)
+
+        # Remove button
+        rm = QtWidgets.QPushButton("✕")
+        rm.setFixedSize(18, 18)
+        rm.setFlat(True)
+        rm.clicked.connect(self._remove)
+        lay.addWidget(rm)
+
+    # ── internals ──────────────────────────────────────────────────────────
+
+    def _update_swatch(self):
+        self._swatch.setStyleSheet(
+            f"background-color:{self._color.name()}; border:1px solid #666;")
+
+    def _pick_color(self):
+        c = QtWidgets.QColorDialog.getColor(self._color, self)
+        if c.isValid():
+            self._color = c
+            self._update_swatch()
+            self.changed.emit()
+
+    def _move_up(self):
+        parent_lay = self.parent().layout() if self.parent() else None
+        if parent_lay is None:
+            return
+        idx = parent_lay.indexOf(self)
+        if idx > 0:
+            parent_lay.removeWidget(self)
+            parent_lay.insertWidget(idx - 1, self)
+            self.changed.emit()
+
+    def _move_down(self):
+        parent_lay = self.parent().layout() if self.parent() else None
+        if parent_lay is None:
+            return
+        idx = parent_lay.indexOf(self)
+        if idx >= 0 and idx < parent_lay.count() - 1:
+            parent_lay.removeWidget(self)
+            parent_lay.insertWidget(idx + 1, self)
+            self.changed.emit()
+
+    def _remove(self):
+        self.hide()
+        self.deleteLater()
+        QtCore.QTimer.singleShot(0, self.changed)
+
+    # ── public API ─────────────────────────────────────────────────────────
+
+    def set_symbol_visible(self, visible: bool):
+        self._sym_combo.setVisible(visible)
+
+    def set_symbol(self, code: str | None):
+        idx = self._sym_combo.findData(code)
+        if idx >= 0:
+            self._sym_combo.setCurrentIndex(idx)
+
+    def get_data(self) -> dict:
+        return {
+            "color":  self._color,
+            "label":  self._label_edit.text(),
+            "symbol": self._sym_combo.currentData(),
+            "col":    self._col_spin.value(),
+        }
+
+class LegendPreviewWidget(QtWidgets.QWidget):
+    """
+    Custom widget that paints a legend rectangle matching the configured
+    parameters — used as the live preview panel in LegendParametersDialog.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries    = []
+        self._use_sym    = False
+        self._font_pt    = 11
+        self._font_fam   = ""
+        self._show_box   = True
+        self._shadow     = False
+        self._rounded    = False
+        self._ncols      = 1
+        self.setMinimumSize(220, 120)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding)
+
+    def set_data(self, entries, use_symbols, font_pt, font_family,
+                 show_box, shadow, rounded, ncols):
+        self._entries  = entries
+        self._use_sym  = use_symbols
+        self._font_pt  = font_pt
+        self._font_fam = font_family
+        self._show_box = show_box
+        self._shadow   = shadow
+        self._rounded  = rounded
+        self._ncols    = ncols
+        self.update()
+
+    # ── painting ───────────────────────────────────────────────────────────
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        # Dark background so legend is legible
+        painter.fillRect(self.rect(), QtGui.QColor("#1e1e1e"))
+
+        if not self._entries:
+            painter.setPen(QtGui.QColor("#666"))
+            painter.drawText(self.rect(),
+                             QtCore.Qt.AlignmentFlag.AlignCenter,
+                             "No active peak-list entries")
+            painter.end()
+            return
+
+        font = QtGui.QFont(self._font_fam or "")
+        font.setPointSize(max(6, self._font_pt))
+        painter.setFont(font)
+        fm = QtGui.QFontMetrics(font)
+
+        PAD   = 10
+        SWATCH_W = 28
+        GAP   = 6
+        ROW_H = max(fm.height() + 6, 22)
+
+        ncols = max(1, self._ncols)
+
+        # Distribute entries across columns by their .col field
+        col_entries: list[list[dict]] = [[] for _ in range(ncols)]
+        for e in self._entries:
+            c = min(max(e.get("col", 1), 1), ncols) - 1
+            col_entries[c].append(e)
+
+        max_rows = max((len(c) for c in col_entries), default=1)
+
+        # Measure column widths
+        col_widths = []
+        for col in col_entries:
+            max_text = max(
+                (fm.horizontalAdvance(e.get("label", "")) for e in col),
+                default=60)
+            col_widths.append(PAD + SWATCH_W + GAP + max_text + PAD)
+
+        total_w = sum(col_widths) + PAD
+        total_h = PAD + max_rows * ROW_H + PAD
+
+        x0 = max(PAD, (self.width()  - total_w) // 2)
+        y0 = max(PAD, (self.height() - total_h) // 2)
+
+        rad = 5 if self._rounded else 0
+
+        # Shadow
+        if self._shadow:
+            painter.setBrush(QtGui.QColor(0, 0, 0, 100))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            if rad:
+                painter.drawRoundedRect(x0 + 5, y0 + 5, total_w, total_h, rad, rad)
+            else:
+                painter.drawRect(x0 + 5, y0 + 5, total_w, total_h)
+
+        # Box background
+        if self._show_box:
+            painter.setBrush(QtGui.QColor(255, 255, 255, 230))
+            painter.setPen(QtGui.QPen(QtGui.QColor("#aaaaaa"), 1))
+            if rad:
+                painter.drawRoundedRect(x0, y0, total_w, total_h, rad, rad)
+            else:
+                painter.drawRect(x0, y0, total_w, total_h)
+        else:
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+
+        # Draw each column
+        cx = x0 + PAD
+        for ci, col in enumerate(col_entries):
+            for ri, entry in enumerate(col):
+                color  = entry.get("color", QtGui.QColor("#888"))
+                if not isinstance(color, QtGui.QColor):
+                    color = QtGui.QColor(color)
+                label  = entry.get("label", "")
+                symbol = entry.get("symbol") if self._use_sym else None
+
+                row_y  = y0 + PAD + ri * ROW_H
+                mid_y  = row_y + ROW_H // 2
+
+                # Swatch / symbol
+                painter.setPen(QtGui.QPen(color, 2.5))
+                painter.setBrush(QtGui.QBrush(color))
+                if symbol:
+                    self._draw_symbol(painter, cx + SWATCH_W // 2, mid_y, 7, symbol, color)
+                else:
+                    painter.drawLine(cx, mid_y, cx + SWATCH_W, mid_y)
+
+                # Label text (dark on light box, light otherwise)
+                text_color = QtGui.QColor("#111111") if self._show_box else QtGui.QColor("#dddddd")
+                painter.setPen(QtGui.QPen(text_color))
+                text_y = row_y + (ROW_H + fm.ascent() - fm.descent()) // 2
+                painter.drawText(cx + SWATCH_W + GAP, text_y, label)
+
+            cx += col_widths[ci]
+
+        painter.end()
+
+    @staticmethod
+    def _draw_symbol(painter, cx, cy, r, symbol, color):
+        import math
+        c = color if isinstance(color, QtGui.QColor) else QtGui.QColor(color)
+        painter.setBrush(QtGui.QBrush(c))
+        painter.setPen(QtGui.QPen(c, 1.5))
+
+        def poly(*pts):
+            painter.drawPolygon([QtCore.QPointF(x, y) for x, y in pts])
+
+        if symbol == 'o':
+            painter.drawEllipse(QtCore.QPointF(cx, cy), r, r)
+        elif symbol == 's':
+            painter.drawRect(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
+        elif symbol == 'd':
+            poly((cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy))
+        elif symbol == 't':
+            poly((cx, cy - r), (cx + r, cy + r), (cx - r, cy + r))
+        elif symbol == 't1':
+            poly((cx, cy + r), (cx + r, cy - r), (cx - r, cy - r))
+        elif symbol == 't2':
+            poly((cx + r, cy), (cx - r, cy - r), (cx - r, cy + r))
+        elif symbol == 't3':
+            poly((cx - r, cy), (cx + r, cy - r), (cx + r, cy + r))
+        elif symbol in ('+', 'crosshair'):
+            painter.drawLine(QtCore.QPointF(cx - r, cy), QtCore.QPointF(cx + r, cy))
+            painter.drawLine(QtCore.QPointF(cx, cy - r), QtCore.QPointF(cx, cy + r))
+            if symbol == 'crosshair':
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(QtCore.QPointF(cx, cy), r * 0.45, r * 0.45)
+        elif symbol == 'x':
+            painter.drawLine(QtCore.QPointF(cx - r, cy - r), QtCore.QPointF(cx + r, cy + r))
+            painter.drawLine(QtCore.QPointF(cx + r, cy - r), QtCore.QPointF(cx - r, cy + r))
+        elif symbol == 'star':
+            pts = []
+            for i in range(5):
+                a_out = math.radians(-90 + i * 72)
+                a_in  = math.radians(-90 + i * 72 + 36)
+                pts += [(cx + r * math.cos(a_out), cy + r * math.sin(a_out)),
+                        (cx + r * 0.4 * math.cos(a_in), cy + r * 0.4 * math.sin(a_in))]
+            poly(*pts)
+        elif symbol == 'p':
+            pts = [(cx + r * math.cos(math.radians(-90 + i * 72)),
+                    cy + r * math.sin(math.radians(-90 + i * 72))) for i in range(5)]
+            poly(*pts)
+        elif symbol == 'h':
+            pts = [(cx + r * math.cos(math.radians(i * 60)),
+                    cy + r * math.sin(math.radians(i * 60))) for i in range(6)]
+            poly(*pts)
+        elif symbol == 'arrow_up':
+            poly((cx, cy - r), (cx + r * 0.6, cy + r * 0.5), (cx - r * 0.6, cy + r * 0.5))
+        elif symbol == 'arrow_down':
+            poly((cx, cy + r), (cx + r * 0.6, cy - r * 0.5), (cx - r * 0.6, cy - r * 0.5))
+        elif symbol == 'arrow_right':
+            poly((cx + r, cy), (cx - r * 0.5, cy - r * 0.6), (cx - r * 0.5, cy + r * 0.6))
+        elif symbol == 'arrow_left':
+            poly((cx - r, cy), (cx + r * 0.5, cy - r * 0.6), (cx + r * 0.5, cy + r * 0.6))
+        else:
+            painter.drawEllipse(QtCore.QPointF(cx, cy), r, r)
+
+class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
+    """
+    On-screen peak-list legend rendered via QPainter.
+    Exact visual match with LegendPreviewWidget; supports multi-column,
+    custom font family, background, shadow, and rounded corners.
+    Inherits anchor() from GraphicsWidgetAnchor, same as pg.LegendItem.
+    """
+
+    def __init__(self):
+        pg.GraphicsWidget.__init__(self)
+        pg.GraphicsWidgetAnchor.__init__(self)
+        self._entries: list[dict] = []
+        self._params:  dict       = {}
+        self._w = 60
+        self._h = 20
+
+    def set_data(self, entries: list[dict], params: dict):
+        self._entries = entries
+        self._params  = params
+        self._w, self._h = self._measure()
+        self.setGeometry(0, 0, self._w, self._h)
+        self.update()
+
+    def boundingRect(self):
+        return QtCore.QRectF(0, 0, self._w, self._h)
+
+    # ── internal helpers ───────────────────────────────────────────────────
+
+    def _font(self):
+        fam = self._params.get("font_family", "")
+        pt  = max(6, self._params.get("font_pt", 11))
+        f   = QtGui.QFont(fam or "")
+        f.setPointSize(pt)
+        return f
+
+    def _layout(self):
+        """Return (col_entries, col_widths, ROW_H) for the current entries."""
+        font  = self._font()
+        fm    = QtGui.QFontMetrics(font)
+        ncols = max(1, self._params.get("ncols", 1))
+        PAD, SWATCH, GAP = 8, 24, 5
+        ROW_H = max(fm.height() + 4, 18)
+
+        col_entries = [[] for _ in range(ncols)]
+        for e in self._entries:
+            c = min(max(e.get("col", 1), 1), ncols) - 1
+            col_entries[c].append(e)
+
+        col_widths = []
+        for col in col_entries:
+            max_text = max(
+                (fm.horizontalAdvance(e.get("label", "")) for e in col),
+                default=40)
+            col_widths.append(SWATCH + GAP + max_text + PAD)
+
+        return col_entries, col_widths, ROW_H, fm
+
+    def _measure(self):
+        if not self._entries:
+            return 60, 20
+        col_entries, col_widths, ROW_H, _ = self._layout()
+        PAD = 8
+        max_rows = max((len(c) for c in col_entries), default=1)
+        total_w  = PAD + sum(col_widths)
+        total_h  = PAD + max_rows * ROW_H + PAD
+        return total_w, total_h
+
+    # ── rendering ──────────────────────────────────────────────────────────
+
+    def paint(self, painter, option, widget=None):
+        if not self._entries:
+            return
+
+        p        = self._params
+        show_box = p.get("show_box", True)
+        shadow   = p.get("shadow",   False)
+        rounded  = p.get("rounded",  False)
+        use_sym  = p.get("use_symbols", False)
+        dark_bg  = p.get("dark_bg",  False)
+
+        font = self._font()
+        painter.setFont(font)
+        col_entries, col_widths, ROW_H, fm = self._layout()
+
+        PAD, SWATCH, GAP = 8, 24, 5
+        w, h = self._w, self._h
+        rad  = 5 if rounded else 0
+
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        # Shadow
+        if shadow:
+            painter.setBrush(QtGui.QColor(0, 0, 0, 70))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            sr = QtCore.QRectF(4, 4, w, h)
+            if rad:
+                painter.drawRoundedRect(sr, rad, rad)
+            else:
+                painter.drawRect(sr)
+
+        # Background
+        if show_box:
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 210)))
+            painter.setPen(QtGui.QPen(QtGui.QColor(150, 150, 150, 200), 1))
+            br = QtCore.QRectF(0, 0, w, h)
+            if rad:
+                painter.drawRoundedRect(br, rad, rad)
+            else:
+                painter.drawRect(br)
+
+        text_color = (QtGui.QColor("#111111") if (show_box or not dark_bg)
+                      else QtGui.QColor("#eeeeee"))
+
+        cx = PAD
+        for ci, col in enumerate(col_entries):
+            for ri, entry in enumerate(col):
+                color = entry.get("color", QtGui.QColor("#888"))
+                if not isinstance(color, QtGui.QColor):
+                    color = QtGui.QColor(color)
+                label = entry.get("label", "")
+                sym   = entry.get("symbol") if use_sym else None
+
+                row_y = PAD + ri * ROW_H
+                mid_y = row_y + ROW_H // 2
+
+                painter.setPen(QtGui.QPen(color, 2.5))
+                painter.setBrush(QtGui.QBrush(color))
+                if sym:
+                    LegendPreviewWidget._draw_symbol(
+                        painter, cx + SWATCH // 2, mid_y, 6, sym, color)
+                else:
+                    painter.drawLine(cx, mid_y, cx + SWATCH, mid_y)
+
+                painter.setPen(QtGui.QPen(text_color))
+                text_y = row_y + (ROW_H + fm.ascent() - fm.descent()) // 2
+                painter.drawText(cx + SWATCH + GAP, text_y, label)
+
+            cx += col_widths[ci] if ci < len(col_widths) else PAD
+
+
+class SavedLabelsImportDialog(QtWidgets.QDialog):
+    """
+    Modal dialog to select one or more saved labels to import into the legend.
+    Shows colour swatch and symbol name for each saved entry.
+    """
+
+    def __init__(self, parent, labels_file: Path):
+        super().__init__(parent)
+        self.setWindowTitle("Import saved labels")
+        self.setMinimumWidth(480)
+        self.setMinimumHeight(340)
+        self._file     = labels_file
+        self._data     = []
+        self._selected = []
+        self._build_ui()
+        self._load()
+
+    def _build_ui(self):
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addWidget(QtWidgets.QLabel(
+            "Select one or more labels to add as legend entries:"))
+
+        self._table = QtWidgets.QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Colour", "Symbol", "Label"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(0, 50)
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(1, 120)
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self._table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        self._table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        lay.addWidget(self._table)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok |
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def _load(self):
+        if not self._file.exists():
+            return
+        try:
+            self._data = sorted(
+                json.loads(self._file.read_text(encoding="utf-8")),
+                key=lambda e: e.get("text", "").lower())
+        except Exception:
+            return
+
+        self._table.setRowCount(len(self._data))
+        for ri, entry in enumerate(self._data):
+            color  = QtGui.QColor(entry.get("color", "#888888"))
+            sym    = entry.get("symbol", "")
+            text   = entry.get("text", "")
+
+            swatch = QtWidgets.QTableWidgetItem()
+            swatch.setBackground(QtGui.QBrush(color))
+            self._table.setItem(ri, 0, swatch)
+
+            sym_name = MARKER_SYMBOL_NAMES.get(sym, "—") if sym else "—"
+            self._table.setItem(ri, 1, QtWidgets.QTableWidgetItem(sym_name))
+            self._table.setItem(ri, 2, QtWidgets.QTableWidgetItem(text))
+
+    def _on_accept(self):
+        rows = sorted({i.row() for i in self._table.selectedItems()})
+        self._selected = [self._data[r] for r in rows]
+        self.accept()
+
+    def get_selected(self) -> list[dict]:
+        return self._selected
+
+
+class LegendParametersDialog(QtWidgets.QDialog, StayOnTopMixin):
+    """
+    Live-preview dialog for the peak-list legend.
+
+    Left panel  — all controls (scrollable).
+    Right panel — LegendPreviewWidget showing the legend as it will appear.
+
+    Changes are debounced 500 ms then applied to the on-screen legend and
+    the global _legend_entries list (used by exports).
+
+    Labels are persisted to ~/.droplet/legend_labels.json, sorted
+    alphabetically, so users can reuse them across sessions.
+    """
+
+    _LABELS_FILE = Path.home() / ".droplet" / "legend_labels.json"
+
+    def __init__(self, parent, peak_rows, spectrum_legend, plot_ref, app_settings):
+        super().__init__(parent)   # plain dialog — not always on top
+        self.setWindowTitle("Legend parameters")
+        self.setMinimumHeight(560)
+
+        self._peak_rows       = peak_rows
+        self._spectrum_legend = spectrum_legend   # pg.LegendItem for spectra
+        self._plot            = plot_ref
+        self._settings        = app_settings
+        self._entry_widgets: list[LegendEntryWidget] = []
+
+        # 500 ms debounce — apply to plot only when user stops editing
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._apply_to_plot)
+
+        self._build_ui()
+        if _legend_entries:
+            self._load_from_legend_entries()
+        self._refresh_from_peak_rows()
+
+    # ── UI construction ─────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        # ── Menu bar ──────────────────────────────────────────────────
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        menu_bar = QtWidgets.QMenuBar(self)
+        labels_menu = menu_bar.addMenu("Labels")
+        import_act = QtWidgets.QAction("Import saved labels…", self)
+        import_act.setToolTip(
+            "Browse previously saved labels and add one or more to the legend.")
+        import_act.triggered.connect(self._open_import_dialog)
+        labels_menu.addAction(import_act)
+        save_act = QtWidgets.QAction("Save current labels", self)
+        save_act.setToolTip(
+            "Append every current label to the persistent saved list\n"
+            "(duplicates are ignored).")
+        save_act.triggered.connect(self._save_current_labels)
+        labels_menu.addAction(save_act)
+        self._install_stay_on_top(menu_bar, self._settings)
+        vbox.addWidget(menu_bar)
+
+        # ── Content row: QSplitter so the user can resize panels ──────
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        vbox.addWidget(splitter, 1)
+
+        # ── Left panel ────────────────────────────────────────────────
+        left_inner = QtWidgets.QWidget()
+        left_scroll = QtWidgets.QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_inner)
+        left_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        splitter.addWidget(left_scroll)
+
+        lay = QtWidgets.QVBoxLayout(left_inner)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(10)
+
+        # ── Show on plot ──
+        self.show_cb = QtWidgets.QCheckBox("Show peak-list legend on plot")
+        self.show_cb.setChecked(
+            self._settings.value("legend/show", True, type=bool))
+        self.show_cb.toggled.connect(self._schedule)
+        lay.addWidget(self.show_cb)
+
+        # ── Mode ──
+        mode_grp = QtWidgets.QGroupBox("Symbol mode")
+        mode_lay = QtWidgets.QVBoxLayout(mode_grp)
+        self.mode_color_rb  = QtWidgets.QRadioButton("Color only  (colored line swatch)")
+        self.mode_symbol_rb = QtWidgets.QRadioButton("Color + symbol")
+        self.mode_color_rb.setChecked(
+            not self._settings.value("legend/use_symbols", False, type=bool))
+        self.mode_symbol_rb.setChecked(
+            self._settings.value("legend/use_symbols", False, type=bool))
+        mode_lay.addWidget(self.mode_color_rb)
+        mode_lay.addWidget(self.mode_symbol_rb)
+
+        autogen_btn = QtWidgets.QPushButton("⚡  Auto-generate symbols from peak lists")
+        autogen_btn.setToolTip(
+            "Assign a distinct symbol to each entry automatically,\n"
+            "then switch to Color + symbol mode.")
+        autogen_btn.clicked.connect(self._auto_generate_symbols)
+        mode_lay.addWidget(autogen_btn)
+
+        self.symbols_on_peaks_cb = QtWidgets.QCheckBox("Show symbols over peaks on plot")
+        self.symbols_on_peaks_cb.setToolTip(
+            "Draw the legend symbol directly on each highlighted peak in the main view.\n"
+            "Requires 'Color + symbol' mode. Labels are shifted up automatically\n"
+            "to avoid overlapping the symbols.")
+        self.symbols_on_peaks_cb.setChecked(
+            self._settings.value("legend/symbols_on_peaks", False, type=bool))
+        self.symbols_on_peaks_cb.toggled.connect(self._schedule)
+        mode_lay.addWidget(self.symbols_on_peaks_cb)
+
+        sym_pos_row = QtWidgets.QHBoxLayout()
+        sym_pos_row.setContentsMargins(18, 0, 0, 0)
+
+        _sym_h_lbl = QtWidgets.QLabel("Height offset:")
+        _sym_h_lbl.setStyleSheet("color: gray;")
+        sym_pos_row.addWidget(_sym_h_lbl)
+        self.symbol_y_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.symbol_y_offset_spin.setRange(0.0, 1.0)
+        self.symbol_y_offset_spin.setSingleStep(0.02)
+        self.symbol_y_offset_spin.setDecimals(2)
+        self.symbol_y_offset_spin.setValue(
+            self._settings.value("legend/symbol_y_offset", 0.0, type=float))
+        self.symbol_y_offset_spin.setFixedWidth(68)
+        self.symbol_y_offset_spin.setToolTip(
+            "Vertical offset for symbols above the peak tip.\n"
+            "Log scale: added to log10(intensity); linear: fraction of peak height.")
+        self.symbol_y_offset_spin.valueChanged.connect(self._schedule)
+        sym_pos_row.addWidget(self.symbol_y_offset_spin)
+        sym_pos_row.addSpacing(10)
+
+        _sym_sz_lbl = QtWidgets.QLabel("Size:")
+        _sym_sz_lbl.setStyleSheet("color: gray;")
+        sym_pos_row.addWidget(_sym_sz_lbl)
+        self.symbol_size_spin = QtWidgets.QSpinBox()
+        self.symbol_size_spin.setRange(4, 40)
+        self.symbol_size_spin.setValue(
+            self._settings.value("legend/symbol_size", 10, type=int))
+        self.symbol_size_spin.setSuffix(" px")
+        self.symbol_size_spin.setFixedWidth(68)
+        self.symbol_size_spin.setToolTip("Diameter of the symbols drawn over peaks (pixels).")
+        self.symbol_size_spin.valueChanged.connect(self._schedule)
+        sym_pos_row.addWidget(self.symbol_size_spin)
+        sym_pos_row.addStretch()
+        mode_lay.addLayout(sym_pos_row)
+
+        # Set initial enabled state for symbol-mode-only controls
+        _use_sym_init = self._settings.value("legend/use_symbols", False, type=bool)
+        self.symbols_on_peaks_cb.setEnabled(_use_sym_init)
+        self.symbol_y_offset_spin.setEnabled(_use_sym_init)
+        self.symbol_size_spin.setEnabled(_use_sym_init)
+
+        self.mode_color_rb.toggled.connect(self._on_mode_changed)
+        lay.addWidget(mode_grp)
+
+        # ── Entries ──
+        entries_grp = QtWidgets.QGroupBox("Legend entries")
+        entries_grp_lay = QtWidgets.QVBoxLayout(entries_grp)
+
+        self._entries_container = QtWidgets.QWidget()
+        self._entries_layout = QtWidgets.QVBoxLayout(self._entries_container)
+        self._entries_layout.setContentsMargins(0, 0, 0, 0)
+        self._entries_layout.setSpacing(2)
+        entries_grp_lay.addWidget(self._entries_container)
+
+        refresh_btns = QtWidgets.QHBoxLayout()
+        add_new_btn = QtWidgets.QPushButton("↺  Add new from peak lists")
+        add_new_btn.setToolTip(
+            "Add entries for any active peak-list rows not already in the legend.\n"
+            "Existing entries are kept unchanged.")
+        add_new_btn.clicked.connect(self._refresh_from_peak_rows)
+        replace_btn = QtWidgets.QPushButton("⟳  Replace all")
+        replace_btn.setToolTip(
+            "Clear all current entries and rebuild the list from active peak-list rows.")
+        replace_btn.clicked.connect(self._replace_all_from_peak_rows)
+        refresh_btns.addWidget(add_new_btn)
+        refresh_btns.addWidget(replace_btn)
+        entries_grp_lay.addLayout(refresh_btns)
+        lay.addWidget(entries_grp)
+
+        # ── Appearance ──
+        app_grp = QtWidgets.QGroupBox("Appearance")
+        app_form = QtWidgets.QFormLayout(app_grp)
+        app_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+        font_row = QtWidgets.QHBoxLayout()
+        self.font_combo = QtWidgets.QFontComboBox()
+        saved_fam = self._settings.value("legend/font_family", "")
+        if saved_fam:
+            self.font_combo.setCurrentFont(QtGui.QFont(saved_fam))
+        self.font_combo.currentFontChanged.connect(self._schedule)
+        self.font_pt_spin = QtWidgets.QSpinBox()
+        self.font_pt_spin.setRange(6, 48)
+        self.font_pt_spin.setValue(
+            self._settings.value("legend/font_pt", 11, type=int))
+        self.font_pt_spin.setSuffix(" pt")
+        self.font_pt_spin.setFixedWidth(68)
+        self.font_pt_spin.valueChanged.connect(self._schedule)
+        font_row.addWidget(self.font_combo, 1)
+        font_row.addWidget(self.font_pt_spin)
+        app_form.addRow("Font:", font_row)
+
+        self.show_box_cb = QtWidgets.QCheckBox()
+        self.show_box_cb.setChecked(
+            self._settings.value("legend/show_box", True, type=bool))
+        self.show_box_cb.toggled.connect(self._schedule)
+        app_form.addRow("Show legend box:", self.show_box_cb)
+
+        self.shadow_cb = QtWidgets.QCheckBox()
+        self.shadow_cb.setChecked(
+            self._settings.value("legend/shadow", False, type=bool))
+        self.shadow_cb.toggled.connect(self._schedule)
+        app_form.addRow("Shadow:", self.shadow_cb)
+
+        self.rounded_cb = QtWidgets.QCheckBox()
+        self.rounded_cb.setChecked(
+            self._settings.value("legend/rounded", False, type=bool))
+        self.rounded_cb.toggled.connect(self._schedule)
+        app_form.addRow("Rounded corners:", self.rounded_cb)
+
+        self.ncols_spin = QtWidgets.QSpinBox()
+        self.ncols_spin.setRange(1, 10)
+        self.ncols_spin.setValue(
+            self._settings.value("legend/ncols", 1, type=int))
+        self.ncols_spin.valueChanged.connect(self._schedule)
+        app_form.addRow("Columns:", self.ncols_spin)
+
+        size_row = QtWidgets.QHBoxLayout()
+        self.width_spin = QtWidgets.QSpinBox()
+        self.width_spin.setRange(0, 1200)
+        self.width_spin.setValue(self._settings.value("legend/width", 0, type=int))
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setSpecialValueText("Auto")
+        self.width_spin.setFixedWidth(90)
+        self.width_spin.valueChanged.connect(self._schedule)
+        self.height_spin = QtWidgets.QSpinBox()
+        self.height_spin.setRange(0, 900)
+        self.height_spin.setValue(self._settings.value("legend/height", 0, type=int))
+        self.height_spin.setSuffix(" px")
+        self.height_spin.setSpecialValueText("Auto")
+        self.height_spin.setFixedWidth(90)
+        self.height_spin.valueChanged.connect(self._schedule)
+        size_row.addWidget(self.width_spin)
+        size_row.addWidget(QtWidgets.QLabel("×"))
+        size_row.addWidget(self.height_spin)
+        size_row.addStretch()
+        app_form.addRow("Size W × H:", size_row)
+
+        lay.addWidget(app_grp)
+
+        # ── Refresh button ──
+        refresh_plot_btn = QtWidgets.QPushButton("↻  Refresh legend on plot")
+        refresh_plot_btn.setToolTip(
+            "Apply all current settings to the on-screen legend immediately,\n"
+            "without waiting for the debounce timer.")
+        refresh_plot_btn.clicked.connect(self._apply_to_plot)
+        lay.addWidget(refresh_plot_btn)
+
+        lay.addStretch()
+
+        # ── Right panel (preview) ──────────────────────────────────────
+        right = QtWidgets.QWidget()
+        right_lay = QtWidgets.QVBoxLayout(right)
+        right_lay.setContentsMargins(4, 4, 4, 4)
+        right_lay.setSpacing(4)
+        right_lay.addWidget(QtWidgets.QLabel("Preview:"))
+        self._preview = LegendPreviewWidget()
+        right_lay.addWidget(self._preview, 1)
+        splitter.addWidget(right)
+        # Initial sizes: left panel fits content, right panel fills the rest
+        splitter.setSizes([620, 380])
+
+    # ── Slots ───────────────────────────────────────────────────────────────
+
+    def _schedule(self):
+        """Trigger debounce and immediately refresh the static preview."""
+        self._update_preview()
+        self._timer.start()
+
+    def _on_mode_changed(self):
+        use_sym = self.mode_symbol_rb.isChecked()
+        for w in self._entry_widgets:
+            w.set_symbol_visible(use_sym)
+        self.symbols_on_peaks_cb.setEnabled(use_sym)
+        self.symbol_y_offset_spin.setEnabled(use_sym)
+        self.symbol_size_spin.setEnabled(use_sym)
+        self._schedule()
+
+    def _auto_generate_symbols(self):
+        """Assign a symbol from the full list to each entry in order."""
+        for i, w in enumerate(self._entry_widgets):
+            w.set_symbol(MARKER_SYMBOLS[i % len(MARKER_SYMBOLS)])
+        self.mode_symbol_rb.setChecked(True)  # also triggers _on_mode_changed
+        self._schedule()
+
+    # ── Entry management ────────────────────────────────────────────────────
+
+    def _load_from_legend_entries(self):
+        """Populate entry widgets from the in-memory _legend_entries (persisted state)."""
+        use_sym = self.mode_symbol_rb.isChecked()
+        for entry in _legend_entries:
+            color = entry.get("color", QtGui.QColor("#888888"))
+            if not isinstance(color, QtGui.QColor):
+                color = QtGui.QColor(color)
+            label = entry.get("label", "")
+            sym   = entry.get("symbol") or None
+            col   = int(entry.get("col", 1))
+            w = LegendEntryWidget(color, label, show_symbol=use_sym, symbol=sym)
+            w._col_spin.setValue(col)
+            w.changed.connect(self._schedule)
+            self._entries_layout.addWidget(w)
+            self._entry_widgets.append(w)
+        if _legend_entries:
+            self._update_preview()
+
+    def _refresh_from_peak_rows(self):
+        """Non-destructive: add entries for peak rows not already in the legend."""
+        use_sym = self.mode_symbol_rb.isChecked()
+        active  = [r for r in self._peak_rows
+                   if r["checkbox"].isChecked()
+                   and r["label_input"].text().strip()]
+        existing = {w.get_data()["label"]
+                    for w in self._entry_widgets if w.isVisible()}
+        for row in active:
+            color = row.get("color", [QtGui.QColor("#888888")])[0]
+            label = row["label_input"].text().strip()
+            if label in existing:
+                continue
+            w = LegendEntryWidget(color, label, show_symbol=use_sym)
+            w.changed.connect(self._schedule)
+            self._entries_layout.addWidget(w)
+            self._entry_widgets.append(w)
+            existing.add(label)
+        self._update_preview()
+
+    def _replace_all_from_peak_rows(self):
+        """Destructive: clear all entries then repopulate from active peak rows."""
+        while self._entries_layout.count():
+            item = self._entries_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._entry_widgets.clear()
+        use_sym = self.mode_symbol_rb.isChecked()
+        for row in [r for r in self._peak_rows
+                    if r["checkbox"].isChecked()
+                    and r["label_input"].text().strip()]:
+            color = row.get("color", [QtGui.QColor("#888888")])[0]
+            label = row["label_input"].text().strip()
+            w = LegendEntryWidget(color, label, show_symbol=use_sym)
+            w.changed.connect(self._schedule)
+            self._entries_layout.addWidget(w)
+            self._entry_widgets.append(w)
+        self._update_preview()
+
+    def _collect_entries(self) -> list[dict]:
+        """Return current entry data from all visible entry widgets."""
+        return [
+            w.get_data()
+            for w in self._entry_widgets
+            if w.isVisible()
+        ]
+
+    # ── Preview ─────────────────────────────────────────────────────────────
+
+    def _update_preview(self):
+        self._preview.set_data(
+            entries     = self._collect_entries(),
+            use_symbols = self.mode_symbol_rb.isChecked(),
+            font_pt     = self.font_pt_spin.value(),
+            font_family = self.font_combo.currentFont().family(),
+            show_box    = self.show_box_cb.isChecked(),
+            shadow      = self.shadow_cb.isChecked(),
+            rounded     = self.rounded_cb.isChecked(),
+            ncols       = self.ncols_spin.value(),
+        )
+
+    # ── Apply to plot (called after debounce) ───────────────────────────────
+
+    def _apply_to_plot(self):
+        global _legend_entries
+        s = self._settings
+
+        # Persist settings
+        s.setValue("legend/show",        self.show_cb.isChecked())
+        s.setValue("legend/font_pt",     self.font_pt_spin.value())
+        s.setValue("legend/font_family", self.font_combo.currentFont().family())
+        s.setValue("legend/show_box",    self.show_box_cb.isChecked())
+        s.setValue("legend/shadow",      self.shadow_cb.isChecked())
+        s.setValue("legend/rounded",     self.rounded_cb.isChecked())
+        s.setValue("legend/ncols",       self.ncols_spin.value())
+        s.setValue("legend/width",       self.width_spin.value())
+        s.setValue("legend/height",      self.height_spin.value())
+        s.setValue("legend/use_symbols",      self.mode_symbol_rb.isChecked())
+        s.setValue("legend/symbols_on_peaks", self.symbols_on_peaks_cb.isChecked())
+        s.setValue("legend/symbol_y_offset",  self.symbol_y_offset_spin.value())
+        s.setValue("legend/symbol_size",      self.symbol_size_spin.value())
+
+        # Update global entries (used by exports) and persist to disk
+        _legend_entries = self._collect_entries()
+        _save_legend_entries()
+
+        # Apply font to spectrum legend
+        pt = self.font_pt_spin.value()
+        self._spectrum_legend.setLabelTextSize(f"{pt}pt")
+
+        # Rebuild on-screen peak-list legend and peak-symbol overlay
+        _rebuild_peak_legend_on_plot()
+        render_plot()
+
+    # ── Saved labels ────────────────────────────────────────────────────────
+
+    def _save_current_labels(self):
+        existing: list[dict] = []
+        if self._LABELS_FILE.exists():
+            try:
+                existing = json.loads(
+                    self._LABELS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        existing_texts = {e["text"] for e in existing}
+        for entry in self._collect_entries():
+            text = entry["label"]
+            if text and text not in existing_texts:
+                existing.append({
+                    "text":   text,
+                    "color":  entry["color"].name()
+                              if isinstance(entry["color"], QtGui.QColor)
+                              else str(entry["color"]),
+                    "symbol": entry.get("symbol") or "",
+                })
+                existing_texts.add(text)
+
+        existing.sort(key=lambda e: e.get("text", "").lower())
+        self._LABELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._LABELS_FILE.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8")
+
+    def _delete_saved_label(self):
+        pass  # kept for compatibility; deletion is now done via import dialog
+
+    def _open_import_dialog(self):
+        """Auto-save current labels, then open the import picker."""
+        self._save_current_labels()   # make sure current labels appear in the list
+        dlg = SavedLabelsImportDialog(self, self._LABELS_FILE)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        use_sym = self.mode_symbol_rb.isChecked()
+        for entry in dlg.get_selected():
+            color = QtGui.QColor(entry.get("color", "#888888"))
+            label = entry.get("text", "")
+            sym   = entry.get("symbol") or None
+            w = LegendEntryWidget(color, label, show_symbol=use_sym, symbol=sym)
+            w.changed.connect(self._schedule)
+            self._entries_layout.addWidget(w)
+            self._entry_widgets.append(w)
+        self._schedule()
+
 # ─────────────────────────────────────────────
 #  View / remaining action connections
 # ─────────────────────────────────────────────
@@ -8125,15 +9973,13 @@ subtract_dyn_action.toggled.connect(lambda _: render_plot())
 highlight_slider.valueChanged.connect(lambda _: render_plot())
 overlay_opacity_slider.valueChanged.connect(lambda _: render_plot())
 
-def _apply_legend_font(pt=None):
-    if pt is None:
-        pt = legend_font_spin.value()
-    legend.setLabelTextSize(f"{pt}pt")
-    settings.setValue("legend_font_pt", pt)
+# Apply saved legend font to spectrum legend on startup
+_startup_legend_pt = settings.value("legend/font_pt", 11, type=int)
+legend.setLabelTextSize(f"{_startup_legend_pt}pt")
 
-legend_font_spin.valueChanged.connect(_apply_legend_font)
-# Apply saved value immediately (called after legend exists)
-QtCore.QTimer.singleShot(0, _apply_legend_font)
+# Load persisted legend entries from disk, then rebuild the on-screen legend
+_load_legend_entries()
+QtCore.QTimer.singleShot(0, _rebuild_peak_legend_on_plot)
 main_toggle.stateChanged.connect(lambda _: render_plot())
 peak_labels_toggle.stateChanged.connect(lambda _: render_plot())
 peak_masses_toggle.stateChanged.connect(lambda _: render_plot())
@@ -8143,6 +9989,29 @@ peak_masses_all_toggle.stateChanged.connect(lambda _: render_plot())
 threshold_mode_combo.currentIndexChanged.connect(lambda _: (_clear_auto_peaks_cache(), render_plot()))
 show_integers_toggle.stateChanged.connect(lambda v: (
     settings.setValue("show_integers", bool(v)), render_plot()))
+
+_legend_params_dialog = None
+
+def _open_legend_params():
+    global _legend_params_dialog
+    if _legend_params_dialog is not None:
+        _legend_params_dialog.raise_()
+        _legend_params_dialog.activateWindow()
+        return
+    _legend_params_dialog = LegendParametersDialog(
+        parent          = None,   # no parent → not transient-for main window
+        peak_rows       = custom_peak_rows,
+        spectrum_legend = legend,
+        plot_ref        = plot,
+        app_settings    = settings,
+    )
+    _legend_params_dialog.setAttribute(
+        QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+    _legend_params_dialog.destroyed.connect(
+        lambda: globals().update(_legend_params_dialog=None))
+    _legend_params_dialog.show()
+
+legend_params_action.triggered.connect(_open_legend_params)
 
 # Restore saved mode
 _saved_thr_mode = settings.value("threshold_mode", "% of max intensity")
@@ -8295,6 +10164,109 @@ app.installEventFilter(ctrl_filter)
 # ─────────────────────────────────────────────
 #  Plot export helpers
 # ─────────────────────────────────────────────
+def batch_export_plots():
+    """Export one PNG for every file in the current folder, preserving zoom."""
+    files = list_all_txt_files()
+    if not files:
+        QtWidgets.QMessageBox.warning(
+            main_win, "No files",
+            "No spectrum files found in the current folder.")
+        return
+
+    # Format choice
+    fmt, ok = QtWidgets.QInputDialog.getItem(
+        main_win, "Batch Export — Format", "Image format:",
+        ["PNG", "SVG"], 0, False)
+    if not ok:
+        return
+
+    # Output folder
+    out_folder = QtWidgets.QFileDialog.getExistingDirectory(
+        main_win, "Select Output Folder", base_dir or "")
+    if not out_folder:
+        return
+
+    # Save current view range and active file so we can restore them
+    x_range = list(plot.vb.viewRange()[0])
+    y_range = list(plot.vb.viewRange()[1])
+    original_path = combo.currentData() or combo.currentText()
+    screen_pt = legend_font_spin.value()
+
+    # Progress dialog
+    progress = QtWidgets.QProgressDialog(
+        "Exporting plots…", "Cancel", 0, len(files), main_win)
+    progress.setWindowTitle("Batch Export")
+    progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+    progress.setMinimumDuration(0)
+    progress.setValue(0)
+
+    n_ok = 0
+    errors = []
+
+    for i, fpath in enumerate(files):
+        if progress.wasCanceled():
+            break
+        stem = os.path.splitext(os.path.basename(fpath))[0]
+        progress.setLabelText(f"({i+1}/{len(files)})  {stem}")
+        progress.setValue(i)
+        QtWidgets.QApplication.processEvents()
+
+        try:
+            # Load the file and let the plot render
+            plot_file(fpath)
+            QtWidgets.QApplication.processEvents()
+
+            # Restore the zoom that was active before the batch started
+            plot.vb.setXRange(x_range[0], x_range[1], padding=0)
+            plot.vb.setYRange(y_range[0], y_range[1], padding=0)
+            QtWidgets.QApplication.processEvents()
+
+            out_path = os.path.join(out_folder, f"{stem}.{fmt.lower()}")
+
+            if fmt == "PNG":
+                from pyqtgraph.exporters import ImageExporter
+                EXPORT_WIDTH = 4000
+                export_pt = max(8, int(screen_pt * EXPORT_WIDTH / max(plot_widget.width(), 1)))
+                legend.setLabelTextSize(f"{export_pt}pt")
+                def _do_png(_p=out_path):
+                    try:
+                        exp = ImageExporter(plot)
+                        exp.parameters()['width'] = EXPORT_WIDTH
+                        exp.export(_p)
+                    finally:
+                        legend.setLabelTextSize(f"{screen_pt}pt")
+                _export_with_colored_labels(_do_png, export_scale=40.0)
+
+            elif fmt == "SVG":
+                from pyqtgraph.exporters import SVGExporter
+                export_pt = max(8, int(screen_pt * 4.0))
+                legend.setLabelTextSize(f"{export_pt}pt")
+                def _do_svg(_p=out_path):
+                    try:
+                        exp = SVGExporter(plot)
+                        exp.export(_p)
+                    finally:
+                        legend.setLabelTextSize(f"{screen_pt}pt")
+                _export_with_colored_labels(_do_svg, export_scale=40.0)
+
+            n_ok += 1
+        except Exception as e:
+            errors.append(f"{stem}: {e}")
+
+    progress.setValue(len(files))
+
+    # Restore the original file and zoom
+    if original_path and os.path.exists(str(original_path)):
+        plot_file(original_path)
+        QtWidgets.QApplication.processEvents()
+        plot.vb.setXRange(x_range[0], x_range[1], padding=0)
+        plot.vb.setYRange(y_range[0], y_range[1], padding=0)
+
+    msg = f"Done. {n_ok}/{len(files)} plot(s) exported to:\n{out_folder}"
+    if errors:
+        msg += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:15])
+    QtWidgets.QMessageBox.information(main_win, "Batch Export Complete", msg)
+
 def export_plot_png():
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
         main_win, "Export Plot as PNG", _get_dialog_dir("export_plot"), "PNG Images (*.png)")
@@ -8303,8 +10275,8 @@ def export_plot_png():
     if not path.lower().endswith(".png"): path += ".png"
     from pyqtgraph.exporters import ImageExporter
     EXPORT_WIDTH = 4000
-    screen_pt    = legend_font_spin.value()
-    export_pt    = max(8, int(screen_pt * EXPORT_WIDTH / max(plot_widget.width(), 1)))
+    screen_pt = settings.value("legend/font_pt", 11, type=int)
+    export_pt = max(8, int(screen_pt * EXPORT_WIDTH / max(plot_widget.width(), 1)))
     legend.setLabelTextSize(f"{export_pt}pt")
     def _do():
         try:
@@ -8313,7 +10285,7 @@ def export_plot_png():
             exp.export(path)
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=70.0)
+    _export_with_colored_labels(_do, export_scale=40.0)
 
 def export_plot_svg():
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -8322,8 +10294,8 @@ def export_plot_svg():
     if not path: return
     if not path.lower().endswith(".svg"): path += ".svg"
     from pyqtgraph.exporters import SVGExporter
-    screen_pt = legend_font_spin.value()
-    export_pt = max(8, int(screen_pt * 4.0))   # SVG is resolution-independent; 4× is readable
+    screen_pt = settings.value("legend/font_pt", 11, type=int)
+    export_pt = max(8, int(screen_pt * 4.0))
     legend.setLabelTextSize(f"{export_pt}pt")
     def _do():
         try:
@@ -8331,7 +10303,7 @@ def export_plot_svg():
             exp.export(path)
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=70.0)
+    _export_with_colored_labels(_do, export_scale=40.0)
 
 def export_plot_pdf():
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -8340,7 +10312,7 @@ def export_plot_pdf():
     if not path: return
     if not path.lower().endswith(".pdf"): path += ".pdf"
     from pyqtgraph.exporters import ImageExporter
-    screen_pt = legend_font_spin.value()
+    screen_pt = settings.value("legend/font_pt", 11, type=int)
     export_pt = max(8, int(screen_pt * 1920 / max(plot_widget.width(), 1)))
     legend.setLabelTextSize(f"{export_pt}pt")
     def _do():
@@ -8368,7 +10340,7 @@ def export_plot_pdf():
             painter.end()
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=70.0)
+    _export_with_colored_labels(_do, export_scale=40.0)
 
 def export_peaks_csv():
     if not highlighted_ranges:
@@ -8453,6 +10425,7 @@ except ImportError:
 export_png_action.triggered.connect(export_plot_png)
 export_svg_action.triggered.connect(export_plot_svg)
 export_pdf_action.triggered.connect(export_plot_pdf)
+batch_export_plots_action.triggered.connect(batch_export_plots)
 copy_plot_action.triggered.connect(copy_plot_to_clipboard)
 export_peaks_csv_action.triggered.connect(export_peaks_csv)
 
@@ -8511,6 +10484,7 @@ dt_combo.currentIndexChanged.connect(lambda _: _on_filter_changed())
 peaks_action.triggered.connect(open_peaks_window)
 import_action.triggered.connect(import_peak_list)
 export_action.triggered.connect(export_peak_list)
+save_pl_action.triggered.connect(save_peak_list)
 open_folder_action.triggered.connect(lambda: open_folder())
 open_files_action.triggered.connect(open_individual_files)
 refresh_action.triggered.connect(refresh_current)
@@ -8755,7 +10729,7 @@ _PT_THEMES = {
 #  Full-featured, standalone plotting environment embedded in a
 #  QWidget the same size as the main window.
 # ═══════════════════════════════════════════════════════════════
-class PlottingToolWindow(QtWidgets.QWidget):
+class PlottingToolWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Opens as a separate top-level window (same initial geometry as main_win).
     Left panel  = canvas (matplotlib figure).
@@ -10435,6 +12409,7 @@ class PlottingToolWindow(QtWidgets.QWidget):
         self._plots_menu = mb.addMenu("Plots")
         self._plots_menu.aboutToShow.connect(self._populate_plots_menu)
 
+        self._install_stay_on_top(mb, settings)
         return mb
 
     def _build_plot_switcher_bar(self):
@@ -12192,4 +14167,15 @@ def _startup_nudge():
     plot_widget.updateGeometry()
 QtCore.QTimer.singleShot(250, _startup_nudge)
 # END startup nudge
+
+# ── Update check (background, non-blocking, 3 s delay so UI settles first) ──
+def _launch_update_check():
+    try:
+        from droplet.ui.update_checker import start_update_check
+        start_update_check(APP_VERSION, main_win, settings)
+    except Exception:
+        pass   # never let update-check crash the app
+
+QtCore.QTimer.singleShot(3000, _launch_update_check)
+
 app.exec()

@@ -12,6 +12,7 @@ except ImportError:
 from droplet.analysis.clusters import run_cluster_detection
 from droplet.analysis.peaks import parse_peaks_text
 from droplet.constants import OVERLAY_COLORS, CLUSTER_SYMBOLS
+from droplet.ui.mixins import StayOnTopMixin
 
 
 def _get_app():
@@ -19,7 +20,7 @@ def _get_app():
     return _m
 
 
-class ClusterDetectionWindow(QtWidgets.QWidget):
+class ClusterDetectionWindow(QtWidgets.QWidget, StayOnTopMixin):
     """Non-modal window: parameter controls on top, results grouped by cluster below."""
 
     def __init__(self, parent=None):
@@ -31,9 +32,11 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
         _a = _get_app()
 
         self._clusters                 = []
-        self._inc_chks                 = []
+        self._inc_chks                 = []   # kept for _add_to_peak_lists compat
+        self._peak_included            = {}   # {ci: {pi: bool}}
+        self._results_table            = None
         self._scatter_items_by_cluster = []
-        self._group_boxes              = []
+        self._group_boxes              = []   # kept for _apply_opacity compat
         self._selected_cluster         = None
         self._scatter_click_handled    = False
         self._click_cycle              = []
@@ -42,6 +45,10 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
+
+        _mbar = QtWidgets.QMenuBar()
+        self._install_stay_on_top(_mbar, _a.settings)
+        root.setMenuBar(_mbar)
 
         # ── Parameter bar ──────────────────────────────────────────────────
         param_box  = QtWidgets.QGroupBox("Detection parameters")
@@ -98,36 +105,86 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
             "When enabled, detection runs only on the m/z values in the\n"
             "selected peak list(s). Spacings are discovered automatically.\n"
             "SNR / intensity % filters are ignored.")
-        pl_layout = QtWidgets.QVBoxLayout(self._pl_box)
-        pl_layout.setSpacing(3)
+        pl_outer = QtWidgets.QVBoxLayout(self._pl_box)
+        pl_outer.setContentsMargins(4, 4, 4, 4)
+        pl_outer.setSpacing(2)
+
+        # ── Compact table: one row per peak list, peaks as toggle columns ──
         self._pl_checks      = []
         self._pl_peak_checks = {}
 
+        rows_data = []
         for row in _a.custom_peak_rows:
-            lbl    = row["label_input"].text().strip() or "Unnamed"
-            row_cb = QtWidgets.QCheckBox(lbl)
-            row_cb.setStyleSheet("font-weight: bold;")
-            pl_layout.addWidget(row_cb)
-            peak_checks = []
             peaks = parse_peaks_text(row["peaks_input"].text())
-            if peaks:
-                peak_container = QtWidgets.QWidget()
-                peak_layout    = QtWidgets.QHBoxLayout(peak_container)
-                peak_layout.setContentsMargins(20, 0, 0, 0)
-                peak_layout.setSpacing(4)
-                for mz in peaks:
+            if not peaks:
+                continue
+            rows_data.append((row, peaks))
+
+        if rows_data:
+            max_pl_peaks = max(len(p) for _, p in rows_data)
+            pl_table = QtWidgets.QTableWidget(len(rows_data), 2 + max_pl_peaks)
+            pl_table.setHorizontalHeaderLabels(
+                ["", "Peak list"] + [""] * max_pl_peaks)
+            pl_table.horizontalHeader().setSectionResizeMode(
+                0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            pl_table.setColumnWidth(0, 24)
+            pl_table.horizontalHeader().setSectionResizeMode(
+                1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            for c in range(2, 2 + max_pl_peaks):
+                pl_table.horizontalHeader().setSectionResizeMode(
+                    c, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            pl_table.verticalHeader().setVisible(False)
+            pl_table.setShowGrid(True)
+            pl_table.setAlternatingRowColors(True)
+            pl_table.setEditTriggers(
+                QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+            pl_table.setSelectionMode(
+                QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+            pl_table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            ROW_H_PL = 24
+            pl_table.setMaximumHeight(
+                pl_table.horizontalHeader().sizeHint().height() +
+                min(5, len(rows_data)) * ROW_H_PL + 6)
+
+            for ri, (row, peaks) in enumerate(rows_data):
+                pl_table.setRowHeight(ri, ROW_H_PL)
+                color = row["color"][0]
+                hex_c = color.name() if hasattr(color, "name") else str(color)
+                lbl   = row["label_input"].text().strip() or "Unnamed"
+
+                # Col 0: color swatch
+                swatch_item = QtWidgets.QTableWidgetItem()
+                swatch_item.setBackground(
+                    QtGui.QBrush(QtGui.QColor(hex_c)))
+                pl_table.setItem(ri, 0, swatch_item)
+
+                # Col 1: row-level include checkbox + label
+                row_cb = QtWidgets.QCheckBox(lbl)
+                row_cb.setChecked(False)
+                row_cb.setStyleSheet("font-weight: bold; padding-left: 2px;")
+                pl_table.setCellWidget(ri, 1, row_cb)
+
+                # Col 2+: individual peak toggle buttons
+                peak_checks = []
+                for pi, mz in enumerate(peaks):
                     pk_cb = QtWidgets.QCheckBox(f"{mz:.4g}")
                     pk_cb.setChecked(True)
-                    pk_cb.setToolTip(f"Include m/z {mz:.4g} in cluster detection")
-                    peak_layout.addWidget(pk_cb)
+                    pk_cb.setToolTip(f"Include m/z {mz:.4g} in detection")
+                    cell_w = QtWidgets.QWidget()
+                    cell_l = QtWidgets.QHBoxLayout(cell_w)
+                    cell_l.addWidget(pk_cb)
+                    cell_l.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    cell_l.setContentsMargins(2, 0, 2, 0)
+                    pl_table.setCellWidget(ri, 2 + pi, cell_w)
                     peak_checks.append((pk_cb, mz))
-                peak_layout.addStretch()
-                pl_layout.addWidget(peak_container)
-            self._pl_checks.append((row_cb, row))
-            self._pl_peak_checks[id(row)] = peak_checks
 
-        if not self._pl_checks:
-            pl_layout.addWidget(QtWidgets.QLabel("(no peak lists defined)"))
+                self._pl_checks.append((row_cb, row))
+                self._pl_peak_checks[id(row)] = peak_checks
+
+            pl_outer.addWidget(pl_table)
+        else:
+            pl_outer.addWidget(QtWidgets.QLabel("(no peak lists with peaks defined)"))
+
         self._pl_box.toggled.connect(self._on_pl_mode_toggled)
         root.addWidget(self._pl_box)
 
@@ -156,6 +213,11 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
         close_btn.clicked.connect(self.close)
         btn_row.addWidget(close_btn)
         root.addLayout(btn_row)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen_h = QtWidgets.QApplication.primaryScreen().availableGeometry().height()
+        self.setMaximumHeight(screen_h - 60)
 
     def _on_pl_mode_toggled(self, enabled):
         for widget in (self._spacing_edit, self._snr_spin, self._pct_spin):
@@ -206,19 +268,28 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
         progress.close()
         self._rebuild_results()
 
+    # unicode approximations for pyqtgraph symbol codes
+    _SYM_UNICODE = {
+        'o': '●', 's': '■', 't': '▲', 'd': '◆',
+        'star': '★', 'p': '⬠', 'h': '⬡',
+        't2': '▶', 't3': '◀', 'x': '✕',
+    }
+
     def _rebuild_results(self):
         _a = _get_app()
         _a._clear_cluster_scatter()
         self._scatter_items_by_cluster.clear()
         self._group_boxes.clear()
         self._selected_cluster = None
+        self._peak_included.clear()
+        self._inc_chks.clear()
+        self._results_table = None
 
         while self._results_layout.count():
             item = self._results_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
-        self._inc_chks.clear()
 
         if not self._clusters:
             self._status_lbl.setText(
@@ -229,108 +300,87 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
 
         self._status_lbl.setText(
             f"{len(self._clusters)} cluster(s) detected.  "
-            "✦ = peak overlaps a known peak list entry.")
+            "Click a peak cell to exclude it.  ✦ = overlaps a known peak list entry.")
         self._add_btn.setEnabled(True)
 
-        for ci, cluster in enumerate(self._clusters):
-            color_hex = OVERLAY_COLORS[ci % len(OVERLAY_COLORS)]
-            symbol    = CLUSTER_SYMBOLS[ci % len(CLUSTER_SYMBOLS)]
+        max_peaks = max(len(c['members']) for c in self._clusters)
+
+        # ── Single table: one row per cluster ─────────────────────────────
+        table = QtWidgets.QTableWidget(len(self._clusters), 2 + max_peaks)
+        self._results_table = table
+
+        # Column headers
+        table.setHorizontalHeaderLabels(
+            ["", "Cluster"] + [f"#{i+1}" for i in range(max_peaks)])
+        table.horizontalHeader().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(0, 34)
+        table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        for c in range(2, 2 + max_peaks):
+            table.horizontalHeader().setSectionResizeMode(
+                c, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(True)
+        table.setAlternatingRowColors(False)
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+        ROW_H = 28
+        for ri, cluster in enumerate(self._clusters):
+            table.setRowHeight(ri, ROW_H)
+            color_hex = OVERLAY_COLORS[ri % len(OVERLAY_COLORS)]
+            symbol    = CLUSTER_SYMBOLS[ri % len(CLUSTER_SYMBOLS)]
             spacing   = cluster['spacing']
             members   = cluster['members']
 
-            gb = QtWidgets.QGroupBox()
-            gb.setStyleSheet(
-                f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                f"margin-top: 6px; padding-top: 4px; }}")
-            gb_vbox = QtWidgets.QVBoxLayout(gb)
-            gb_vbox.setContentsMargins(6, 2, 6, 6)
-            gb_vbox.setSpacing(3)
+            self._peak_included[ri] = {pi: True for pi in range(len(members))}
 
-            hdr_row = QtWidgets.QHBoxLayout()
-            swatch  = QtWidgets.QLabel()
-            swatch.setFixedSize(14, 14)
-            swatch.setStyleSheet(
-                f"background-color: {color_hex}; border: 1px solid gray; border-radius: 2px;")
-            hdr_row.addWidget(swatch)
-            hdr_lbl = QtWidgets.QLabel(
-                f"<b>Cluster {ci+1}</b>  -  Δ = {spacing:.3f} Da  ({len(members)} peaks)")
-            hdr_lbl.setStyleSheet(f"color: {color_hex};")
-            hdr_row.addWidget(hdr_lbl)
-            hdr_row.addStretch()
+            # Col 0: coloured swatch with unicode symbol
+            sym_char = self._SYM_UNICODE.get(symbol, '●')
+            swatch_lbl = QtWidgets.QLabel(sym_char)
+            swatch_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            swatch_lbl.setStyleSheet(
+                f"color: {color_hex}; font-size: 16px; font-weight: bold;"
+                f"background-color: {QtGui.QColor(color_hex).lighter(185).name()};"
+                f"border: 1px solid {color_hex}; border-radius: 3px;")
+            swatch_lbl.setToolTip(f"Cluster {ri+1} — click to highlight on plot")
+            swatch_lbl.mousePressEvent = (
+                lambda e, i=ri: self._select_cluster_direct(i))
+            table.setCellWidget(ri, 0, swatch_lbl)
 
-            all_none_btn = QtWidgets.QPushButton("None")
-            all_none_btn.setFixedSize(46, 20)
-            all_none_btn.setCheckable(True)
-            all_none_btn.setStyleSheet(
-                "QPushButton { font-size: 10px; padding: 0 4px; }"
-                "QPushButton:checked { background: #444; color: #aaa; }")
-            hdr_row.addWidget(all_none_btn)
-            gb_vbox.addLayout(hdr_row)
+            # Col 1: cluster info
+            info_item = QtWidgets.QTableWidgetItem(
+                f"Cluster {ri+1}   Δ = {spacing:.3f} Da   ({len(members)} peaks)")
+            info_item.setForeground(QtGui.QBrush(QtGui.QColor(color_hex)))
+            info_item.setFont(QtGui.QFont("", -1, QtGui.QFont.Weight.Bold))
+            info_item.setToolTip("Click to highlight this cluster on the plot")
+            table.setItem(ri, 1, info_item)
 
-            col_hdr = QtWidgets.QHBoxLayout()
-            col_hdr.addSpacing(20)
-            for txt, w in [("m/z", 100), ("Intensity", 110)]:
-                lbl = QtWidgets.QLabel(f"<small><i>{txt}</i></small>")
-                lbl.setFixedWidth(w)
-                lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                col_hdr.addWidget(lbl)
-            col_hdr.addWidget(QtWidgets.QLabel("<small><i>Include</i></small>"))
-            col_hdr.addStretch()
-            gb_vbox.addLayout(col_hdr)
-
-            group_chks = []
-            for mz, intensity, is_known in members:
-                peak_row  = QtWidgets.QWidget()
-                pr_layout = QtWidgets.QHBoxLayout(peak_row)
-                pr_layout.setContentsMargins(20, 0, 0, 0); pr_layout.setSpacing(4)
-                star    = " ✦" if is_known else ""
-                mz_lbl  = QtWidgets.QLabel(f"{mz:.4f}{star}")
-                mz_lbl.setFixedWidth(100)
-                mz_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            # Col 2+: individual peak cells (click to toggle inclusion)
+            for pi, (mz, intensity, is_known) in enumerate(members):
+                star = "✦ " if is_known else ""
+                cell = QtWidgets.QTableWidgetItem(f"{star}{mz:.4f}")
+                cell.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                tt = f"m/z {mz:.4f}\nIntensity: {intensity:.3g}"
                 if is_known:
-                    mz_lbl.setStyleSheet("color: #f0a000;")
-                    mz_lbl.setToolTip("This m/z overlaps a known peak list entry")
-                int_lbl = QtWidgets.QLabel(f"{intensity:.3g}")
-                int_lbl.setFixedWidth(110)
-                int_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                int_lbl.setStyleSheet("color: gray; font-size: 11px;")
-                chk = QtWidgets.QCheckBox(); chk.setChecked(True)
-                pr_layout.addWidget(mz_lbl); pr_layout.addWidget(int_lbl)
-                pr_layout.addWidget(chk); pr_layout.addStretch()
-                gb_vbox.addWidget(peak_row)
-                group_chks.append((mz, chk))
+                    tt += "\n✦ Overlaps a known peak list entry"
+                cell.setToolTip(tt)
+                # Store state in the item
+                cell.setData(QtCore.Qt.ItemDataRole.UserRole,
+                             {"ci": ri, "pi": pi, "mz": mz,
+                              "color": color_hex, "is_known": is_known})
+                self._style_peak_cell(cell, included=True,
+                                      color_hex=color_hex, is_known=is_known)
+                table.setItem(ri, 2 + pi, cell)
 
-            self._inc_chks.append(group_chks)
-
-            def _make_cascade(chks_list):
-                def _on(checked, src_mz):
-                    if checked: return
-                    for mz, chk in chks_list:
-                        if mz > src_mz:
-                            chk.blockSignals(True); chk.setChecked(False); chk.blockSignals(False)
-                return _on
-            cascade = _make_cascade(group_chks)
-            for mz, chk in group_chks:
-                chk.toggled.connect(lambda checked, m=mz, fn=cascade: fn(checked, m))
-
-            def _make_all_none(chks_list, btn):
-                def _on(pressed):
-                    for _, chk in chks_list:
-                        chk.blockSignals(True); chk.setChecked(not pressed); chk.blockSignals(False)
-                    btn.setText("All" if pressed else "None")
-                return _on
-            all_none_btn.toggled.connect(_make_all_none(group_chks, all_none_btn))
-
-            self._group_boxes.append(gb)
-            def _make_gb_click(idx):
-                def _press(event):
-                    if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        self._select_cluster_direct(idx)
-                    super(QtWidgets.QGroupBox, gb).mousePressEvent(event)
-                return _press
-            gb.mousePressEvent = _make_gb_click(ci)
-            self._results_layout.addWidget(gb)
-
+            # Scatter on main plot
             mz_arr  = np.array([m[0] for m in members])
             int_arr = np.array([m[1] for m in members])
             y_arr   = np.where(int_arr > 0, np.log10(int_arr) + 0.05, 0.0)
@@ -341,21 +391,61 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
             _a.plot.addItem(scatter)
             _a._cluster_scatter_items.append(scatter)
             self._scatter_items_by_cluster.append(scatter)
+            self._group_boxes.append(None)   # keep list aligned with cluster indices
             scatter.sigClicked.connect(
-                lambda item, pts, ev, i=ci: self._select_cluster(i, clicked_pts=pts))
+                lambda item, pts, ev, i=ri: self._select_cluster(i, clicked_pts=pts))
+
+        def _on_cell_clicked(row, col):
+            if col <= 1:
+                # Click on swatch or info → select/highlight cluster
+                self._select_cluster_direct(row)
+                return
+            cell = table.item(row, col)
+            if cell is None:
+                return
+            data = cell.data(QtCore.Qt.ItemDataRole.UserRole)
+            if data is None:
+                return
+            ci, pi = data["ci"], data["pi"]
+            new_state = not self._peak_included[ci][pi]
+            self._peak_included[ci][pi] = new_state
+            self._style_peak_cell(cell, included=new_state,
+                                  color_hex=data["color"],
+                                  is_known=data["is_known"])
+
+        table.cellClicked.connect(_on_cell_clicked)
+        self._results_layout.addWidget(table)
 
         try:
             _a.plot.scene().sigMouseClicked.disconnect(self._on_plot_background_click)
         except Exception:
             pass
         _a.plot.scene().sigMouseClicked.connect(self._on_plot_background_click)
-        self._results_layout.addStretch()
+
+    @staticmethod
+    def _style_peak_cell(cell, *, included: bool, color_hex: str, is_known: bool):
+        """Apply visual state (included / excluded) to a peak QTableWidgetItem."""
+        if included:
+            bg = QtGui.QColor(color_hex).lighter(185)
+            fg = QtGui.QColor("#f0a000") if is_known else QtGui.QColor("#111111")
+            cell.setBackground(QtGui.QBrush(bg))
+            cell.setForeground(QtGui.QBrush(fg))
+            font = cell.font(); font.setStrikeOut(False); cell.setFont(font)
+        else:
+            cell.setBackground(QtGui.QBrush(QtGui.QColor("#d8d8d8")))
+            cell.setForeground(QtGui.QBrush(QtGui.QColor("#aaaaaa")))
+            font = cell.font(); font.setStrikeOut(True); cell.setFont(font)
 
     def _add_to_peak_lists(self):
         _a = _get_app()
         added = 0
-        for ci, (cluster, group_chks) in enumerate(zip(self._clusters, self._inc_chks)):
-            included_mz = [mz for mz, chk in group_chks if chk.isChecked()]
+        for ci, cluster in enumerate(self._clusters):
+            members   = cluster['members']
+            inclusion = self._peak_included.get(ci, {})
+            included_mz = [
+                mz for pi, (mz, intensity, is_known) in enumerate(members)
+                if inclusion.get(pi, True)
+            ]
             if not included_mz:
                 continue
             peaks_text = ", ".join(f"{mz:.4f}" for mz in included_mz)
@@ -367,7 +457,7 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
             _a.open_peaks_window()
             self._status_lbl.setText(f"✓ Added {added} cluster(s) to Peak Lists.")
         else:
-            self._status_lbl.setText("Nothing to add - all peaks are unchecked.")
+            self._status_lbl.setText("Nothing to add — all peaks are excluded.")
 
     def _select_cluster(self, idx, clicked_pts=None):
         self._scatter_click_handled = True
@@ -428,6 +518,8 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
     def _apply_opacity(self, selected_idx):
         DIM_ALPHA  = int(210 * 0.2)
         FULL_ALPHA = 210
+
+        # ── Scatter items on the plot ──────────────────────────────────
         for i, scatter in enumerate(self._scatter_items_by_cluster):
             color_hex = OVERLAY_COLORS[i % len(OVERLAY_COLORS)]
             c = pg.mkColor(color_hex)
@@ -439,20 +531,29 @@ class ClusterDetectionWindow(QtWidgets.QWidget):
                 dim = pg.mkColor(color_hex); dim.setAlpha(DIM_ALPHA)
                 scatter.setPen(pg.mkPen(dim, width=1.5))
             scatter.setBrush(pg.mkBrush(c))
-        for i, gb in enumerate(self._group_boxes):
-            color_hex = OVERLAY_COLORS[i % len(OVERLAY_COLORS)]
-            if selected_idx is None or i == selected_idx:
-                gb.setStyleSheet(
-                    f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                    f"margin-top: 6px; padding-top: 4px; }}")
-                gb.setGraphicsEffect(None)
-            else:
-                gb.setStyleSheet(
-                    f"QGroupBox {{ border: 1.5px solid {color_hex}; border-radius: 5px; "
-                    f"margin-top: 6px; padding-top: 4px; opacity: 0.2; }}")
-                effect = QtWidgets.QGraphicsOpacityEffect()
-                effect.setOpacity(0.2)
-                gb.setGraphicsEffect(effect)
+
+        # ── Table rows ─────────────────────────────────────────────────
+        t = self._results_table
+        if t is None:
+            return
+        for ri in range(t.rowCount()):
+            dim = (selected_idx is not None and ri != selected_idx)
+            opacity = 0.25 if dim else 1.0
+            effect = QtWidgets.QGraphicsOpacityEffect()
+            effect.setOpacity(opacity)
+            # Apply to the row's cell widget (swatch) and items
+            sw = t.cellWidget(ri, 0)
+            if sw:
+                sw.setGraphicsEffect(
+                    QtWidgets.QGraphicsOpacityEffect() if not dim else effect)
+                sw.graphicsEffect().setOpacity(opacity) if sw.graphicsEffect() else None
+            for ci in range(1, t.columnCount()):
+                item = t.item(ri, ci)
+                if item:
+                    alpha = 60 if dim else 255
+                    fg = item.foreground().color()
+                    fg.setAlpha(alpha)
+                    item.setForeground(QtGui.QBrush(fg))
 
     def _on_plot_background_click(self, event):
         if event.button() != QtCore.Qt.MouseButton.LeftButton:

@@ -10,6 +10,7 @@ except ImportError:
 
 from droplet.analysis.peaks import get_auto_peaks
 from droplet.io.spectrum_reader import spectrum_display_name
+from droplet.ui.mixins import StayOnTopMixin
 
 
 def _get_app():
@@ -21,7 +22,7 @@ def _get_app():
 _comparison_win_ref = None
 
 
-class PeakComparisonWindow(QtWidgets.QWidget):
+class PeakComparisonWindow(QtWidgets.QWidget, StayOnTopMixin):
     """
     Non-modal window.  Detects peaks in each visible spectrum, classifies
     them as common (present in ALL spectra) or unique (present in only one),
@@ -45,6 +46,10 @@ class PeakComparisonWindow(QtWidgets.QWidget):
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(8)
         root.setContentsMargins(10, 10, 10, 10)
+
+        _mbar = QtWidgets.QMenuBar()
+        self._install_stay_on_top(_mbar)
+        root.setMenuBar(_mbar)
 
         # ── Detection parameters ───────────────────────────────────────────
         param_box = QtWidgets.QGroupBox("Detection parameters")
