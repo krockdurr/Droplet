@@ -137,7 +137,7 @@ The updater:
 
 ---
 
-## Latest Update (v2.7.2)
+## Latest Update (v2.7.1)
 
 Highlights:
 
