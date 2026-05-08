@@ -2,7 +2,7 @@
 
 ---
 
-# v2.7.2
+# v2.7.1
 
 > Correction release — stacked mode rendering, symbol stacking, legend window behaviour, and peak area export fixes.
 
@@ -13,6 +13,7 @@
 Changing label parameters, toggling envelopes, or using L/1L buttons in stacked mode triggered a full layout rebuild via `render_plot()`. Multiple `app.processEvents()` calls inside `_build_stacked_layout` allowed the 80 ms render timer to fire re-entrantly mid-build, tearing down the partially constructed layout and leaving the plot frozen in a broken intermediate state.
 
 Fixes applied:
+
 - `plot_widget.setUpdatesEnabled(False/True)` wraps the entire build; Qt performs one clean paint after completion instead of painting every intermediate state.
 - `processEvents()` calls removed from inside `_build_stacked_layout` — the build is now atomic with respect to the event loop.
 - A generation counter (`_stacked_build_gen`) makes deferred nudge-timer closures self-cancel when a newer build has already superseded them, preventing stale nudges from corrupting zoom state.
@@ -45,6 +46,14 @@ The symbol-drawing loop iterated over `groups`, which deduplicates by label. If 
 
 The dialog was created with `parent=None`, so it had no Qt parent-child relationship with the main window and survived after the application closed. Now created with `parent=main_win`; Qt destroys child widgets when the parent is destroyed.
 
+### Batch PNG export crash
+
+`batch_export_plots` referenced `legend_font_spin`, which was removed in v2.7 when the legend font was moved to the **Legend parameters…** dialog. The function now reads the font size directly from settings (`legend/font_pt`), matching the behaviour of the single-file export functions.
+
+### Spurious second legend in PNG / SVG / PDF exports
+
+When the on-screen `PeakListLegendItem` was active, a second fallback `pg.LegendItem` was still being constructed and injected into the plot during export, producing a duplicate legend not visible in the viewing window. The fallback code path has been removed; exports now only scale the legend that is already on screen.
+
 ## Improvements
 
 ### Peak area CSV export: automatic `.csv` extension
@@ -61,33 +70,15 @@ The dialog was created with `parent=None`, so it had no Qt parent-child relation
 
 This applies to both single-file and batch exports.
 
----
-
-# v2.7.1
-
-> Correction release — fixes and improvements to export and label positioning introduced in v2.7.
-
-## Bug fixes
-
-### Batch PNG export crash
-
-`batch_export_plots` referenced `legend_font_spin`, which was removed in v2.7 when the legend font was moved to the **Legend parameters…** dialog. The function now reads the font size directly from settings (`legend/font_pt`), matching the behaviour of the single-file export functions.
-
-### Spurious second legend in PNG / SVG / PDF exports
-
-When the on-screen `PeakListLegendItem` was active, a second fallback `pg.LegendItem` was still being constructed and injected into the plot during export, producing a duplicate legend not visible in the viewing window. The fallback code path has been removed; exports now only scale the legend that is already on screen.
-
-## Improvements
-
 ### Unified export font scaling
 
 Export font sizes for all three text elements now scale by the same factor — the true pixel ratio (`export_width / plot_widget.width()`):
 
-| Element | v2.7 | v2.7.1 |
-|---|---|---|
-| Spectrum names legend | `screen_pt × (export_width / screen_width)` | unchanged |
-| Peak list legend | `screen_pt × 4` (hardcoded) | `screen_pt × pixel_ratio` |
-| Peak labels | `BASE_PT × 40` (hardcoded, 10× too large) | `BASE_PT × pixel_ratio` |
+| Element               | v2.7                                        | v2.7.1                    |
+| --------------------- | ------------------------------------------- | ------------------------- |
+| Spectrum names legend | `screen_pt × (export_width / screen_width)` | unchanged                 |
+| Peak list legend      | `screen_pt × 4` (hardcoded)                 | `screen_pt × pixel_ratio` |
+| Peak labels           | `BASE_PT × 40` (hardcoded, 10× too large)   | `BASE_PT × pixel_ratio`   |
 
 SVG exports use `pixel_ratio = 1.0` (vector format; the viewer handles scaling).
 
