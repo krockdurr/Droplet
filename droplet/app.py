@@ -54,7 +54,7 @@ import warnings
 warnings.filterwarnings("ignore", message="The figure layout has changed to tight")
 
 
-APP_VERSION = "2.7"
+APP_VERSION = "2.7.1"
 
 from droplet.ui.windows.residuals_viewer import ResidualsViewerWindow
 from droplet.ui.windows.cluster_detection import ClusterDetectionWindow
@@ -302,8 +302,8 @@ next_color_index = 0
 MARKER_SYMBOL_NAMES = {
     "o":           "Circle ●",
     "s":           "Square ■",
-    "t":           "Triangle ▲",
-    "t1":          "Triangle ▼",
+    "t":           "Triangle ▼",
+    "t1":          "Triangle ▲",
     "t2":          "Triangle ▶",
     "t3":          "Triangle ◀",
     "d":           "Diamond ◆",
@@ -776,7 +776,7 @@ label_font_spin.setValue(int(settings.value("label_font_pt", 10)))
 label_font_spin.setSuffix(" pt")
 label_font_spin.setFixedWidth(68)
 label_font_spin.setToolTip("Font size for peak list and auto-peak labels on the plot.")
-label_font_spin.valueChanged.connect(lambda v: (settings.setValue("label_font_pt", v), render_plot()))
+label_font_spin.valueChanged.connect(lambda v: (settings.setValue("label_font_pt", v), _render_peaks_or_full()))
 
 label_angle_spin = QtWidgets.QSpinBox()
 label_angle_spin.setRange(0, 90)
@@ -784,7 +784,7 @@ label_angle_spin.setValue(int(settings.value("label_angle_deg", 60)))
 label_angle_spin.setSuffix(" °")
 label_angle_spin.setFixedWidth(60)
 label_angle_spin.setToolTip("Rotation angle for peak labels (0 = horizontal, 90 = vertical).")
-label_angle_spin.valueChanged.connect(lambda v: (settings.setValue("label_angle_deg", v), render_plot()))
+label_angle_spin.valueChanged.connect(lambda v: (settings.setValue("label_angle_deg", v), _render_peaks_or_full()))
 
 label_altitude_spin = QtWidgets.QDoubleSpinBox()
 label_altitude_spin.setRange(-0.1, 1.0)
@@ -797,7 +797,7 @@ label_altitude_spin.setToolTip(
     "In log scale this is added to the log10 offset; in linear scale\n"
     "it multiplies the peak intensity (0.0 = default, 0.1 = 10% higher).")
 label_altitude_spin.valueChanged.connect(
-    lambda v: (settings.setValue("label_y_offset", v), render_plot()))
+    lambda v: (settings.setValue("label_y_offset", v), _render_peaks_or_full()))
 
 # ── Display ───────────────────────────────────
 display_menu  = menu_bar.addMenu("Display")
@@ -1910,6 +1910,7 @@ _main_curve    = None           # PlotDataItem for the primary spectrum
 _overlay_curves = {}            # id(ov_data) -> PlotDataItem
 _stacked_sub_plots      = []   # list of PlotItem added in stacked mode
 _stacked_mouse_handlers = []   # mouse-move callbacks for stacked sub-plots
+_stacked_build_gen      = 0    # incremented each build; lets stale nudge timers self-cancel
 
 def _invalidate_overlay_curves():
     """Call when overlays are added/removed so stale refs are dropped."""
@@ -5890,7 +5891,8 @@ def _clear_peak_symbol_scatters():
     global _peak_symbol_scatter_items
     for item in _peak_symbol_scatter_items:
         try:
-            plot.removeItem(item)
+            if item.scene() is not None:
+                plot.removeItem(item)
         except Exception:
             pass
     _peak_symbol_scatter_items.clear()
@@ -5921,23 +5923,38 @@ def _draw_peak_symbols_on_plot():
     sym_y_offset = settings.value("legend/symbol_y_offset", 0.0, type=float)
     sym_size     = settings.value("legend/symbol_size", 10, type=int)
 
-    # Collect peak positions per (symbol, color) group
-    groups: dict[tuple, tuple[list, list]] = {}  # (sym, color_name) -> ([mz], [y])
+    # Group peaks by approximate m/z so overlapping symbols stack instead of overlap.
+    # Each mz_group: [representative_mz, [(sym, color, peak_mz, peak_int), ...]]
+    MERGE_TOL = 0.5
+    mz_sym_groups: list = []
     for mz_min, mz_max, peak_label, peak_mz, peak_int in highlighted_ranges:
         if peak_label not in sym_map:
             continue
         sym, color = sym_map[peak_label]
-        color_name = color.name() if isinstance(color, QtGui.QColor) else str(color)
-        key = (sym, color_name)
-        if key not in groups:
-            groups[key] = ([], [])
-        _pi = peak_int
-        if _log_y:
-            y = (np.log10(_pi) + sym_y_offset if _pi > 0 else 0)
-        else:
-            y = _pi * (1.0 + sym_y_offset)
-        groups[key][0].append(peak_mz)
-        groups[key][1].append(y)
+        placed = False
+        for grp in mz_sym_groups:
+            if abs(grp[0] - peak_mz) <= MERGE_TOL:
+                grp[1].append((sym, color, peak_mz, peak_int))
+                placed = True
+                break
+        if not placed:
+            mz_sym_groups.append([peak_mz, [(sym, color, peak_mz, peak_int)]])
+
+    groups: dict[tuple, tuple[list, list]] = {}  # (sym, color_name) -> ([mz], [y])
+    for _rep_mz, sym_entries in mz_sym_groups:
+        for stack_n, (sym, color, peak_mz, peak_int) in enumerate(sym_entries):
+            color_name = color.name() if isinstance(color, QtGui.QColor) else str(color)
+            key = (sym, color_name)
+            if key not in groups:
+                groups[key] = ([], [])
+            _pi = peak_int
+            n = stack_n + 1
+            if _log_y:
+                y = (np.log10(_pi) + n * sym_y_offset if _pi > 0 else 0)
+            else:
+                y = _pi * (1.0 + n * sym_y_offset)
+            groups[key][0].append(peak_mz)
+            groups[key][1].append(y)
 
     for (sym, color_name), (xs, ys) in groups.items():
         scatter = pg.ScatterPlotItem(
@@ -6033,9 +6050,33 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
             if peak_label not in _row_first_mz or peak_mz < _row_first_mz[peak_label]:
                 _row_first_mz[peak_label] = peak_mz
 
-    # ── Draw one TextItem per group ────────────────────────────────────────
+    # ── Pre-compute symbol stack counts per m/z (for label y-positioning) ───
     show_int      = getattr(show_integers_toggle, 'isChecked', lambda: False)()
     label_y_extra = settings.value("label_y_offset", 0.0, type=float)
+    sym_y_offset  = settings.value("legend/symbol_y_offset", 0.0, type=float)
+
+    _show_sym_on_peaks = (
+        settings.value("legend/symbols_on_peaks", False, type=bool) and
+        settings.value("legend/use_symbols",      False, type=bool) and
+        bool(_legend_entries)
+    )
+    # mz_sym_groups: [(representative_mz, stack_count), ...]
+    mz_sym_groups: list = []
+    if _show_sym_on_peaks:
+        sym_map_lbl = {e.get("label", ""): True for e in _legend_entries if e.get("symbol")}
+        for _, _, peak_label, peak_mz, _ in highlighted_ranges:
+            if peak_label not in sym_map_lbl:
+                continue
+            placed = False
+            for grp in mz_sym_groups:
+                if abs(grp[0] - peak_mz) <= MERGE_TOL:
+                    grp[1] += 1
+                    placed = True
+                    break
+            if not placed:
+                mz_sym_groups.append([peak_mz, 1])
+
+    # ── Draw one TextItem per group ────────────────────────────────────────
     for g in groups:
         sm_list, sl_list, has_override = [], [], False
         for lbl in g["labels"]:
@@ -6080,91 +6121,53 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
         text_item = pg.TextItem(text="\n".join(texts), anchor=(0, 0.5), angle=ANGLE,
                                   color=label_color)
         text_item.setFont(font)
+
+        # Find how many symbols are stacked at this peak so the label sits
+        # just above the highest symbol rather than above the raw peak tip.
+        sym_count = 0
+        for grp_mz, count in mz_sym_groups:
+            if abs(grp_mz - g["peak_mz"]) <= MERGE_TOL:
+                sym_count = count
+                break
+
         _pi = g["peak_int"]
         if _log_y:
-            _y = (np.log10(_pi) + 0.06 + label_y_extra if _pi > 0 else 0)
+            _y = (np.log10(_pi) + 0.06 + label_y_extra + sym_count * sym_y_offset
+                  if _pi > 0 else 0)
         else:
-            _y = _pi * (1.04 + label_y_extra)
+            _y = _pi * (1.04 + label_y_extra + sym_count * sym_y_offset)
         text_item.setPos(g["peak_mz"], _y)
         plot.addItem(text_item)
         _label_text_items.append(text_item)
 
     _draw_peak_symbols_on_plot()
 
-def _export_with_colored_labels(export_fn, export_scale=1.0):
-    """Redraw peak labels in row colors at export scale, add export-only peaks legend, call export_fn(), then restore."""
+def _export_with_colored_labels(export_fn, pixel_ratio=1.0):
+    """Redraw peak labels in row colors at export scale, call export_fn(), then restore."""
     show_lbl    = peak_labels_toggle.isChecked()
     show_masses = peak_masses_toggle.isChecked()
     mx = df['intensity'].max() if df is not None and len(df) > 0 else 1.0
     threshold_abs = (mass_threshold_spin.value() / 100.0) * mx
 
     screen_pt = settings.value("legend/font_pt", 11, type=int)
-    export_pt = max(8, int(screen_pt * export_scale / 10))
+    export_pt = max(8, int(screen_pt * pixel_ratio))
 
-    # ── Scale the custom legend for export or build a fallback pg.LegendItem ─
-    # If the user has a configured PeakListLegendItem on screen (_peak_legend),
-    # scale its font up for the export and skip creating a second legend.
-    # Otherwise fall back to the pg.LegendItem (old behaviour).
     _orig_legend_params = None
-    peak_legend  = None
-    _dummy_curves = []
 
     if _peak_legend is not None and _legend_entries:
         _orig_legend_params = dict(_peak_legend._params)
         _exp_params = dict(_orig_legend_params)
         _exp_params["font_pt"] = export_pt
         _peak_legend.set_data(_legend_entries, _exp_params)
-    else:
-        # Fallback: build an export-only pg.LegendItem
-        active_rows = [r for r in custom_peak_rows
-                       if r["checkbox"].isChecked()
-                       and r["label_input"].text().strip()
-                       and parse_peaks_text(r["peaks_input"].text())]
-
-        if active_rows:
-            use_symbols = settings.value("legend/use_symbols", False, type=bool)
-            sym_for_label = {e["label"]: e.get("symbol") for e in _legend_entries}
-
-            peak_legend = pg.LegendItem(offset=(-10, 10))
-            peak_legend.setParentItem(plot.vb)
-            peak_legend.anchor(itemPos=(1, 0), parentPos=(1, 0), offset=(-10, 10))
-            peak_legend.setLabelTextSize(f"{export_pt}pt")
-
-            show_box = settings.value("legend/show_box", True, type=bool)
-            if not show_box:
-                peak_legend.opts["pen"]   = None
-                peak_legend.opts["brush"] = None
-
-            for row in active_rows:
-                color = row["color"][0].name()
-                label = row["label_input"].text().strip()
-                sym   = sym_for_label.get(label) if use_symbols else None
-                if sym:
-                    dummy = pg.PlotDataItem(
-                        pen=pg.mkPen(color, width=2),
-                        symbol=sym,
-                        symbolBrush=pg.mkBrush(color),
-                        symbolPen=pg.mkPen(color),
-                    )
-                else:
-                    dummy = pg.PlotDataItem(pen=pg.mkPen(color, width=3))
-                peak_legend.addItem(dummy, label)
-                _dummy_curves.append(dummy)
 
     # Redraw labels in color at export size
     _draw_peak_labels(show_lbl, show_masses, threshold_abs,
-                      colored=True, font_size=export_scale)
+                      colored=True, font_size=pixel_ratio)
     try:
         export_fn()
     finally:
-        # Restore legend to screen-size params
         if _orig_legend_params is not None and _peak_legend is not None:
             _peak_legend.set_data(_legend_entries, _orig_legend_params)
-        if peak_legend is not None:
-            try:
-                plot.vb.removeItem(peak_legend)
-            except Exception:
-                pass
         # Restore normal labels
         _draw_peak_labels(show_lbl, show_masses, threshold_abs,
                           colored=False, font_size=1.0)
@@ -6348,7 +6351,7 @@ _stacked_click_handlers = []
 _stacked_spectra_data   = []   # (data_df, mz_vals, int_vals) per sub-plot, for peak redraws
 _stacked_peak_items     = []   # peak overlay items per sub-plot, for peak-only redraws
 
-def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items=False):
+def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items=False, mirrored=False):
     """
     Draw peak highlights and labels onto a single stacked sub-plot.
     Mirrors _draw_peak_labels: respects per-row L / 1L button states and
@@ -6362,6 +6365,51 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
     BASE_PT     = settings.value("label_font_pt", 9, type=int)
     LABEL_ANGLE = settings.value("label_angle_deg", 60, type=int)
     VERT_STACK  = settings.value("label_stack_vertical", False, type=bool)
+    label_y_extra = settings.value("label_y_offset", 0.0, type=float)
+    sym_y_offset  = settings.value("legend/symbol_y_offset", 0.0, type=float)
+    sym_size      = settings.value("legend/symbol_size", 10, type=int)
+
+    _show_sym_on_peaks = (
+        settings.value("legend/symbols_on_peaks", False, type=bool) and
+        settings.value("legend/use_symbols",      False, type=bool) and
+        bool(_legend_entries)
+    )
+
+    # Build symbol stacking list before drawing labels so that label y-positions
+    # know the total stack height at each m/z.
+    # Mirrors _draw_peak_symbols_on_plot: one entry per peak occurrence per row
+    # (NOT deduplicated by label) so multiple peaks from the same row at the
+    # same m/z each produce a separate stacked symbol.
+    # _mz_sym_stack: [[rep_mz, [(sym, color_name), ...]], ...]
+    _mz_sym_stack: list = []
+    if _show_sym_on_peaks:
+        _sym_map_pre = {e["label"]: (e["symbol"], e.get("color", QtGui.QColor("#888")))
+                        for e in _legend_entries if e.get("symbol")}
+        for _ri_pre, _row_pre in enumerate(custom_peak_rows):
+            if not _row_pre["checkbox"].isChecked():
+                continue
+            _lbl_pre = _row_pre["label_input"].text().strip() or "Custom peaks"
+            if _lbl_pre not in _sym_map_pre:
+                continue
+            _peaks_pre = parse_peaks_text(_row_pre["peaks_input"].text())
+            if not _peaks_pre:
+                continue
+            _sym_pre, _col_pre = _sym_map_pre[_lbl_pre]
+            _col_name_pre = (_col_pre.name() if isinstance(_col_pre, QtGui.QColor)
+                             else str(_col_pre))
+            _flat_pre = [p for _g in _peaks_pre
+                         for p in (_g if isinstance(_g, (list, tuple)) else [_g])]
+            for _pm_target in _flat_pre:
+                _idx_pre = np.argmin(np.abs(mz_vals - _pm_target))
+                _pm = float(mz_vals[_idx_pre])
+                _placed_pre = False
+                for _gs in _mz_sym_stack:
+                    if abs(_gs[0] - _pm) <= MERGE_TOL:
+                        _gs[1].append((_sym_pre, _col_name_pre))
+                        _placed_pre = True
+                        break
+                if not _placed_pre:
+                    _mz_sym_stack.append([_pm, [(_sym_pre, _col_name_pre)]])
 
     theme_color = 'w' if current_display == 'dark' else 'k'
     created_items = []
@@ -6385,10 +6433,19 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
     # Track lowest m/z seen per label (needed for 1L "first peak" logic)
     _first_mz: dict[str, float] = {}
 
-    # Normalise intensity to [0,1] so positions match the sub-plot's Y axis
-    norm     = normalise_cached(data_df, zero_floor=True)
-    norm_mz  = norm['mz'].values
-    norm_int = norm['intensity'].values   # noqa: F841 (kept for future use)
+    # Use the already-stacked-normalised int_vals for bound finding so that
+    # the highlighted region matches what is visually displayed in the sub-plot.
+    # Clip to [0, 1]: peaks below the threshold can exceed 1 after re-scaling and
+    # would otherwise mislead find_peak_bounds.
+    _bounds_int = np.clip(int_vals, 0, 1.0)
+    _thr_mask   = mz_vals >= 10.9
+    _stk_noise  = (
+        _estimate_noise_floor(_bounds_int[_thr_mask], n_sigma=3.0)
+        if _thr_mask.sum() >= 10 else _DYN_CLIP_FLOOR
+    )
+
+    # norm_mz is used for peak snapping (same mz grid, just for nearest-index lookup)
+    norm_mz = mz_vals
 
     groups = []  # list of {peak_mz, peak_int, labels, colors}
 
@@ -6418,14 +6475,39 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
             if lbl not in _first_mz or peak_mz < _first_mz[lbl]:
                 _first_mz[lbl] = peak_mz
 
-            # Draw highlight bar — _get_highlight_geometry now uses zero-floor
-            # normalised data internally for bound finding, so no wrapper needed.
-            geom_list = _get_highlight_geometry(data_df, [peak_mz_target])
-            for (mz_arr, _int_arr, _mz_min, _mz_max, _pmz, _pint) in geom_list:
-                bg_color = pg.mkColor(theme_color)
-                hi_color = apply_alpha(color_str, _ralpha)
-                bar_idx  = np.searchsorted(mz_vals, mz_arr).clip(0, len(int_vals) - 1)
-                norm_arr = int_vals[bar_idx]
+            # Compute highlight bounds from the stacked-normalised data so the
+            # highlighted region matches the visually displayed peak width.
+            shifted_p = peak_mz_target + peak_shift(peak_mz_target)
+            coarse    = get_tolerance(shifted_p)
+            bounds    = find_peak_bounds(mz_vals, _bounds_int, shifted_p,
+                                         noise_floor=_stk_noise, coarse_tol=coarse)
+
+            bg_color = pg.mkColor(theme_color)
+            hi_color = apply_alpha(color_str, _ralpha)
+
+            if bounds is not None:
+                mz_lo, mz_hi = bounds[0], bounds[1]
+                mask     = (mz_vals >= mz_lo) & (mz_vals <= mz_hi)
+                mz_arr   = mz_vals[mask]
+                norm_arr = int_vals[mask]
+            else:
+                # Fallback: ±10-point window around the nearest sample
+                n     = 10
+                start = max(0, idx - n)
+                end   = min(len(mz_vals), idx + n + 1)
+                mz_arr   = mz_vals[start:end]
+                norm_arr = int_vals[start:end]
+
+            # Use the actual maximum within the highlighted region for symbol/label
+            # placement. The initial peak_int = int_vals[idx] is only the nearest
+            # sample, which may be below the true peak if the target m/z doesn't
+            # land exactly on a spectral data point.
+            if len(norm_arr) > 0:
+                _max_i   = int(np.argmax(norm_arr))
+                peak_int = float(norm_arr[_max_i])
+                peak_mz  = float(mz_arr[_max_i])
+
+            if len(mz_arr) >= 2:
                 sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(bg_color, width=3))
                 sub_plot.plot(mz_arr, norm_arr, pen=pg.mkPen(hi_color, width=3))
             if return_items:
@@ -6501,24 +6583,64 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
         text_item = pg.TextItem(
             text="\n".join(texts),
             anchor=(0, 0.5),
-            angle=LABEL_ANGLE,
+            angle=(LABEL_ANGLE if not mirrored else -LABEL_ANGLE),
             color=label_color,
         )
         text_item.setFont(font)
 
-        # Y position: match the same convention as _draw_peak_labels.
-        # In log mode the plot axis is in log10 space, so use log10(intensity)
-        # + a small offset; in linear mode simply scale slightly above the peak.
+        # Y position: mirrors _draw_peak_labels — respects label_y_offset and
+        # pushes the label above the highest stacked symbol at this peak.
+        sym_count_this = 0
+        for _gs in _mz_sym_stack:
+            if abs(_gs[0] - g["peak_mz"]) <= MERGE_TOL:
+                sym_count_this = len(_gs[1])
+                break
         _pi = g["peak_int"]
         if _log_y and _pi > 0:
-            y_pos = np.log10(_pi) + 0.06
+            y_pos = np.log10(_pi) + 0.06 + label_y_extra + sym_count_this * sym_y_offset
         else:
-            y_pos = _pi * 1.04
+            y_pos = _pi * (1.04 + label_y_extra + sym_count_this * sym_y_offset)
 
         text_item.setPos(g_mz, y_pos)
         sub_plot.addItem(text_item)
         if return_items:
             created_items.append(text_item)
+
+    # ── Legend symbols on this sub-plot ──────────────────────────────────────
+    if _show_sym_on_peaks and _mz_sym_stack:
+        sym_scatter_groups: dict = {}
+        for _gs in _mz_sym_stack:
+            # Use the label-group peak_int (actual max) as the base y so that
+            # symbol positions are consistent with label positions.
+            _base_int = 0.0
+            for g in groups:
+                if abs(g["peak_mz"] - _gs[0]) <= MERGE_TOL:
+                    _base_int = g["peak_int"]
+                    break
+            if _base_int == 0.0:
+                _idx_fb = np.argmin(np.abs(norm_mz - _gs[0]))
+                _base_int = float(int_vals[_idx_fb])
+            for stack_n, (sym, color_name) in enumerate(_gs[1]):
+                n = stack_n + 1
+                if _log_y and _base_int > 0:
+                    y = np.log10(_base_int) + n * sym_y_offset
+                else:
+                    y = _base_int * (1.0 + n * sym_y_offset)
+                key = (sym, color_name)
+                if key not in sym_scatter_groups:
+                    sym_scatter_groups[key] = ([], [])
+                sym_scatter_groups[key][0].append(_gs[0])
+                sym_scatter_groups[key][1].append(y)
+        for (sym, color_name), (xs, ys) in sym_scatter_groups.items():
+            sc = pg.ScatterPlotItem(
+                x=np.array(xs), y=np.array(ys),
+                symbol=sym, size=sym_size,
+                pen=pg.mkPen(color_name, width=1.2),
+                brush=pg.mkBrush(color_name),
+            )
+            sub_plot.addItem(sc)
+            if return_items:
+                created_items.append(sc)
 
     if return_items:
         return created_items
@@ -6531,14 +6653,22 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
     restore_xrange: optional (xmin, xmax) to restore after build instead of auto-ranging.
     restore_yrange: optional (ymin, ymax) to restore after build instead of auto-ranging.
     """
-    global _stacked_sub_plots, _stacked_spectra_data, _stacked_peak_items
+    global _stacked_sub_plots, _stacked_spectra_data, _stacked_peak_items, _stacked_build_gen
+    _stacked_build_gen += 1
+    _my_gen = _stacked_build_gen
+
+    # Suppress all intermediate paints for the duration of the build so neither
+    # partial sub-plot trees nor mid-layout-pass geometry glitches are visible.
+    plot_widget.setUpdatesEnabled(False)
     _stacked_peak_items = []
-    _stacked_spectra_data = []   # list of (data_df, mz_vals, int_vals) per sub-plot
+    _stacked_spectra_data = []
     _destroy_stacked_layout()
-    app.processEvents()
+    # No processEvents() here — that would let the render timer fire
+    # re-entrantly, tearing down the layout we are about to build.
 
     n = len(spectra_list)
     if n == 0:
+        plot_widget.setUpdatesEnabled(True)
         return
 
     theme_color = 'k' if current_display == 'bright' else 'w'
@@ -6755,7 +6885,7 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
 
         # ── Peak highlights, labels, and envelope curves for this sub-plot ──
         items = _draw_stacked_peak_labels(sub, data_df, mz_vals, int_vals,
-                                          return_items=True)
+                                          return_items=True, mirrored=_mirror_this)
         env_items = _draw_stacked_envelope_lines(sub, data_df, mz_vals, int_vals)
         _stacked_peak_items.append((items or []) + env_items)
 
@@ -6780,7 +6910,8 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
         plot_widget.ci.layout.setRowMaximumHeight(i + 1, 16777215)
         plot_widget.ci.layout.setRowStretchFactor(i + 1, 1)
     plot_widget.ci.layout.activate()
-    app.processEvents()
+    # No processEvents() — updates are suppressed; layout will settle on the
+    # first paint after setUpdatesEnabled(True) below.
 
     # Wire a resize handler that re-equalises row heights whenever the widget
     # changes size. We store it so _destroy_stacked_layout can disconnect it.
@@ -6806,7 +6937,18 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
         _on_stacked_resize(event)
     plot_widget.resizeEvent = _patched_resize
 
+    _apply_stacked_y()
+
+    # Re-enable painting — Qt now does a single clean paint of the fully-built
+    # layout instead of a series of intermediate states.
+    plot_widget.setUpdatesEnabled(True)
+    plot_widget.update()
+
     def _nudge_stacked():
+        # Bail out if a newer build has already superseded this one.
+        if _stacked_build_gen != _my_gen:
+            return
+
         # Capture the original resize event into a local variable now, before
         # we unhook anything. _patched_resize_local will close over this local
         # so it never needs to look it up on plot_widget again (where it may
@@ -6843,7 +6985,6 @@ def _build_stacked_layout(spectra_list, restore_xrange=None, restore_yrange=None
             if restore_yrange is not None:
                 master.vb.setYRange(restore_yrange[0], restore_yrange[1], padding=0)
 
-    _apply_stacked_y()
     QtCore.QTimer.singleShot(100, _nudge_stacked)
 
 
@@ -7796,9 +7937,12 @@ class PeakRowsContainer(QtWidgets.QWidget):
 
     def move_row(self, from_idx, to_idx):
         if from_idx == to_idx: return
-        item = self._layout.takeAt(from_idx)
+        item = self._layout.itemAt(from_idx)
         if item is None: return
-        self._layout.insertItem(to_idx, item)
+        widget = item.widget()
+        if widget is None: return
+        self._layout.removeWidget(widget)
+        self._layout.insertWidget(to_idx, widget)
         row = custom_peak_rows.pop(from_idx)
         custom_peak_rows.insert(to_idx, row)
         update_pick_row_combo()
@@ -7814,6 +7958,29 @@ peaks_layout.addWidget(peaks_rows_scroll)
 
 def peaks_rows_layout_add(widget):    peaks_rows_container.add_row_widget(widget)
 def peaks_rows_layout_remove(widget): peaks_rows_container.remove_row_widget(widget)
+
+def _auto_sync_legend_entries():
+    """Rebuild _legend_entries from the current active (checked, labeled) peak rows.
+    Existing customisations (symbol, col) are preserved for unchanged labels."""
+    global _legend_entries
+    existing = {e["label"]: e for e in _legend_entries}
+    new_entries = []
+    seen = set()
+    for row in custom_peak_rows:
+        if not row["checkbox"].isChecked():
+            continue
+        label = row["label_input"].text().strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        color = row["color"][0] if row.get("color") else QtGui.QColor("#888888")
+        if label in existing:
+            e = dict(existing[label])
+            e["color"] = color
+            new_entries.append(e)
+        else:
+            new_entries.append({"label": label, "color": color, "symbol": None, "col": 1})
+    _legend_entries = new_entries
 
 def push_peak_history():
     global _peak_redo
@@ -7847,9 +8014,13 @@ def _redraw_stacked_peaks_only():
 
     # Redraw peaks and envelope curves on each sub-plot
     for sub_idx, sub in enumerate(_stacked_sub_plots):
+        _mirror_this = False
+        if _stacked_mirror:
+            mirror_set = (0 if _stacked_mirror_odd else 1)
+            _mirror_this = (sub_idx % 2 == mirror_set)
         data_df, mz_vals, int_vals = _stacked_spectra_data[sub_idx]
         items_this_sub = _draw_stacked_peak_labels(
-            sub, data_df, mz_vals, int_vals, return_items=True)
+            sub, data_df, mz_vals, int_vals, return_items=True, mirrored=_mirror_this)
         env_items = _draw_stacked_envelope_lines(sub, data_df, mz_vals, int_vals)
         _stacked_peak_items.append((items_this_sub or []) + env_items)
 
@@ -7889,7 +8060,7 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     def pick():
         chosen = QtWidgets.QColorDialog.getColor(row_color[0], peaks_win, "Pick a color")
         if chosen.isValid():
-            row_color[0] = chosen; update_btn(); render_plot(); _rebuild_peak_legend_on_plot()
+            row_color[0] = chosen; update_btn(); render_plot(); _auto_sync_legend_entries(); _rebuild_peak_legend_on_plot()
     btn.clicked.connect(pick); update_btn()
 
     # ── Mode toggle ──
@@ -8130,16 +8301,16 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
         custom_peak_rows.remove(row_data)
         peaks_rows_layout_remove(row_widget)
         _clear_highlight_cache()
-        update_pick_row_combo(); render_plot(); _rebuild_peak_legend_on_plot()
+        update_pick_row_combo(); render_plot(); _auto_sync_legend_entries(); _rebuild_peak_legend_on_plot()
         _sync_confirmation_panel()
 
     remove_btn.clicked.connect(on_remove)
-    checkbox.stateChanged.connect(lambda _: (_render_peaks_or_full(), _rebuild_peak_legend_on_plot()))
+    checkbox.stateChanged.connect(lambda _: (_render_peaks_or_full(), _auto_sync_legend_entries(), _rebuild_peak_legend_on_plot()))
     envelope_btn.toggled.connect(lambda _: render_plot())
     peaks_input.editingFinished.connect(push_peak_history)
     peaks_input.textChanged.connect(lambda _: _render_peaks_or_full())
     label_input.textChanged.connect(lambda _: update_pick_row_combo())
-    label_input.textChanged.connect(lambda _: (_render_peaks_or_full(), _rebuild_peak_legend_on_plot()))
+    label_input.textChanged.connect(lambda _: (_render_peaks_or_full(), _auto_sync_legend_entries(), _rebuild_peak_legend_on_plot()))
     custom_peak_rows.append(row_data)
     peaks_rows_layout_add(row_widget)
     return row_data
@@ -9237,9 +9408,9 @@ class LegendPreviewWidget(QtWidgets.QWidget):
         elif symbol == 'd':
             poly((cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy))
         elif symbol == 't':
-            poly((cx, cy - r), (cx + r, cy + r), (cx - r, cy + r))
+            poly((cx - r, cy - r), (cx, cy + r), (cx + r, cy - r))
         elif symbol == 't1':
-            poly((cx, cy + r), (cx + r, cy - r), (cx - r, cy - r))
+            poly((cx - r, cy + r), (cx, cy - r), (cx + r, cy + r))
         elif symbol == 't2':
             poly((cx + r, cy), (cx - r, cy - r), (cx - r, cy + r))
         elif symbol == 't3':
@@ -9500,7 +9671,7 @@ class SavedLabelsImportDialog(QtWidgets.QDialog):
         return self._selected
 
 
-class LegendParametersDialog(QtWidgets.QDialog, StayOnTopMixin):
+class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
     """
     Live-preview dialog for the peak-list legend.
 
@@ -9517,7 +9688,7 @@ class LegendParametersDialog(QtWidgets.QDialog, StayOnTopMixin):
     _LABELS_FILE = Path.home() / ".droplet" / "legend_labels.json"
 
     def __init__(self, parent, peak_rows, spectrum_legend, plot_ref, app_settings):
-        super().__init__(parent)   # plain dialog — not always on top
+        super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle("Legend parameters")
         self.setMinimumHeight(560)
 
@@ -9912,7 +10083,7 @@ class LegendParametersDialog(QtWidgets.QDialog, StayOnTopMixin):
 
         # Rebuild on-screen peak-list legend and peak-symbol overlay
         _rebuild_peak_legend_on_plot()
-        render_plot()
+        _render_peaks_or_full()
 
     # ── Saved labels ────────────────────────────────────────────────────────
 
@@ -9999,7 +10170,7 @@ def _open_legend_params():
         _legend_params_dialog.activateWindow()
         return
     _legend_params_dialog = LegendParametersDialog(
-        parent          = None,   # no parent → not transient-for main window
+        parent          = main_win,
         peak_rows       = custom_peak_rows,
         spectrum_legend = legend,
         plot_ref        = plot,
@@ -10190,7 +10361,7 @@ def batch_export_plots():
     x_range = list(plot.vb.viewRange()[0])
     y_range = list(plot.vb.viewRange()[1])
     original_path = combo.currentData() or combo.currentText()
-    screen_pt = legend_font_spin.value()
+    screen_pt = settings.value("legend/font_pt", 11, type=int)
 
     # Progress dialog
     progress = QtWidgets.QProgressDialog(
@@ -10226,7 +10397,8 @@ def batch_export_plots():
             if fmt == "PNG":
                 from pyqtgraph.exporters import ImageExporter
                 EXPORT_WIDTH = 4000
-                export_pt = max(8, int(screen_pt * EXPORT_WIDTH / max(plot_widget.width(), 1)))
+                pixel_ratio = EXPORT_WIDTH / max(plot_widget.width(), 1)
+                export_pt = max(8, int(screen_pt * pixel_ratio))
                 legend.setLabelTextSize(f"{export_pt}pt")
                 def _do_png(_p=out_path):
                     try:
@@ -10235,19 +10407,18 @@ def batch_export_plots():
                         exp.export(_p)
                     finally:
                         legend.setLabelTextSize(f"{screen_pt}pt")
-                _export_with_colored_labels(_do_png, export_scale=40.0)
+                _export_with_colored_labels(_do_png, pixel_ratio=pixel_ratio)
 
             elif fmt == "SVG":
                 from pyqtgraph.exporters import SVGExporter
-                export_pt = max(8, int(screen_pt * 4.0))
-                legend.setLabelTextSize(f"{export_pt}pt")
+                legend.setLabelTextSize(f"{screen_pt}pt")
                 def _do_svg(_p=out_path):
                     try:
                         exp = SVGExporter(plot)
                         exp.export(_p)
                     finally:
                         legend.setLabelTextSize(f"{screen_pt}pt")
-                _export_with_colored_labels(_do_svg, export_scale=40.0)
+                _export_with_colored_labels(_do_svg, pixel_ratio=1.0)
 
             n_ok += 1
         except Exception as e:
@@ -10275,8 +10446,9 @@ def export_plot_png():
     if not path.lower().endswith(".png"): path += ".png"
     from pyqtgraph.exporters import ImageExporter
     EXPORT_WIDTH = 4000
+    pixel_ratio = EXPORT_WIDTH / max(plot_widget.width(), 1)
     screen_pt = settings.value("legend/font_pt", 11, type=int)
-    export_pt = max(8, int(screen_pt * EXPORT_WIDTH / max(plot_widget.width(), 1)))
+    export_pt = max(8, int(screen_pt * pixel_ratio))
     legend.setLabelTextSize(f"{export_pt}pt")
     def _do():
         try:
@@ -10285,7 +10457,7 @@ def export_plot_png():
             exp.export(path)
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=40.0)
+    _export_with_colored_labels(_do, pixel_ratio=pixel_ratio)
 
 def export_plot_svg():
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -10295,15 +10467,14 @@ def export_plot_svg():
     if not path.lower().endswith(".svg"): path += ".svg"
     from pyqtgraph.exporters import SVGExporter
     screen_pt = settings.value("legend/font_pt", 11, type=int)
-    export_pt = max(8, int(screen_pt * 4.0))
-    legend.setLabelTextSize(f"{export_pt}pt")
+    legend.setLabelTextSize(f"{screen_pt}pt")
     def _do():
         try:
             exp = SVGExporter(plot)
             exp.export(path)
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=40.0)
+    _export_with_colored_labels(_do, pixel_ratio=1.0)
 
 def export_plot_pdf():
     path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -10312,13 +10483,15 @@ def export_plot_pdf():
     if not path: return
     if not path.lower().endswith(".pdf"): path += ".pdf"
     from pyqtgraph.exporters import ImageExporter
+    PDF_WIDTH = 1920
+    pixel_ratio = PDF_WIDTH / max(plot_widget.width(), 1)
     screen_pt = settings.value("legend/font_pt", 11, type=int)
-    export_pt = max(8, int(screen_pt * 1920 / max(plot_widget.width(), 1)))
+    export_pt = max(8, int(screen_pt * pixel_ratio))
     legend.setLabelTextSize(f"{export_pt}pt")
     def _do():
         try:
             exp = ImageExporter(plot)
-            exp.parameters()['width'] = 1920
+            exp.parameters()['width'] = PDF_WIDTH
             img = exp.export(toBytes=True)
             if img is None:
                 img = plot_widget.grab().toImage()
@@ -10340,7 +10513,7 @@ def export_plot_pdf():
             painter.end()
         finally:
             legend.setLabelTextSize(f"{screen_pt}pt")
-    _export_with_colored_labels(_do, export_scale=40.0)
+    _export_with_colored_labels(_do, pixel_ratio=pixel_ratio)
 
 def export_peaks_csv():
     if not highlighted_ranges:
@@ -10495,8 +10668,20 @@ fmt_combo.currentIndexChanged.connect(
     lambda _: plot_file(combo.currentData() or combo.currentText()))
 
 def cleanup():
+    global _peak_legend
     settings.setValue("base_dir", base_dir)
     save_session_state()
+    # Detach the on-screen legend from its ViewBox parent before Qt destroys the
+    # C++ ViewBox objects. Without this, pyqtgraph's GraphicsWidgetAnchor fires
+    # __geometryChanged on an already-deleted ViewBox → RuntimeError at shutdown.
+    if _peak_legend is not None:
+        for vb in ([plot.vb] + [s.vb for s in _stacked_sub_plots]):
+            try:
+                vb.removeItem(_peak_legend)
+            except Exception:
+                pass
+        _peak_legend = None
+    _clear_peak_symbol_scatters()
 
 app.aboutToQuit.connect(cleanup)
 def _save_project_and_toast():

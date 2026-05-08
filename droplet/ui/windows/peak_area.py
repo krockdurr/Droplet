@@ -402,6 +402,8 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
             self, "Export Ratios", "", "CSV Files (*.csv)")
         if not path:
             return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
         data_key = self._spec_combo.currentData()
         spec_headers = self._get_spectrum_headers(data_key)
         self._write_ratios_csv(path, results, ratio_mode, spec_headers, data)
@@ -410,12 +412,19 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
     def _write_ratios_csv(self, path, results, ratio_mode, spec_headers, data, global_area=None):
         """Write a ratio CSV file with spectrum headers, ratio kind, and ratioed peak list data."""
         MZ_THRESHOLD = 10.9
+
+        # Compute noise floor the same way _correct_spectrum does, for the header.
+        mask_thr = data['mz'] >= MZ_THRESHOLD
+        data_thr_full = data[mask_thr]
+        if len(data_thr_full) >= 2:
+            _, _, noise_floor = self._correct_spectrum(data_thr_full)
+        else:
+            noise_floor = _get_app()._DYN_CLIP_FLOOR
+
         if ratio_mode == "global":
             if global_area is None:
-                mask = data['mz'] >= MZ_THRESHOLD
-                data_thr = data[mask]
-                if len(data_thr) >= 2:
-                    mz_arr, corr_int, floor = self._correct_spectrum(data_thr)
+                if len(data_thr_full) >= 2:
+                    mz_arr, corr_int, _ = self._correct_spectrum(data_thr_full)
                     global_area = float(np.trapz(corr_int, mz_arr))
                 else:
                     global_area = 1.0
@@ -430,6 +439,7 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
         with open(path, 'w', newline='') as fh:
             for hline in spec_headers:
                 fh.write(hline + '\n')
+            fh.write(f"#3_sigma_clip_noise_floor={noise_floor:.6f}\n")
             fh.write(f"#ratio_kind={ratio_kind}\n")
             if ratio_mode == "global":
                 fh.write("#mode_denom=global_spectrum_area\n")
@@ -440,18 +450,18 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
             fh.write("##########\n")
             writer = csv.writer(fh)
             writer.writerow([
-                "peak_list_label", "Reference mass", "Real peak mass", "window_lo", "window_hi", "tolerance (m/z)",
+                "peak_list_label", "Reference mass", "Real peak mass", "window_lo", "window_hi",
                 "peak_max_intensity", "peak_area",
                 "peak list ratio", "individual peak / mode area (full spectra or higher peak list area)",
                 "individual peak / peak list area",
             ])
             for label, color, peaks, peak_details, total_area in results:
                 ratio_val = (total_area / global_area) if global_area > 0 else 0.0
-                for mz_nom, peak_max, peak_area, real_mz, mz_lo, mz_hi, tol in peak_details:
+                for mz_nom, peak_max, peak_area, real_mz, mz_lo, mz_hi in peak_details:
                     indiv_mode = (peak_area / global_area) if global_area > 0 else 0.0
                     indiv_pl   = (peak_area / total_area)  if total_area  > 0 else 0.0
                     writer.writerow([
-                        label, f"{mz_nom:.6f}", f"{real_mz:.6f}", f"{mz_lo:.6f}", f"{mz_hi:.6f}", f"{tol:.6f}",
+                        label, f"{mz_nom:.6f}", f"{real_mz:.6f}", f"{mz_lo:.6f}", f"{mz_hi:.6f}",
                         f"{peak_max:.6f}", f"{peak_area:.6f}",
                         f"{ratio_val:.6f}", f"{indiv_mode:.6f}", f"{indiv_pl:.6f}",
                     ])
@@ -501,18 +511,19 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
                     for mz_nom in peaks:
                         bounds = find_peak_bounds(mz_all, corr_all, mz_nom, noise_floor=floor)
                         if bounds is None:
-                            peak_details.append((mz_nom, 0.0, 0.0))
+                            peak_details.append((mz_nom, 0.0, 0.0, mz_nom, mz_nom, mz_nom))
                             continue
-                        mz_lo_bound, mz_hi_bound, _real_mz, peak_max = bounds
+                        mz_lo_bound, mz_hi_bound, real_mz, peak_max = bounds
                         mask    = (mz_all >= mz_lo_bound) & (mz_all <= mz_hi_bound)
                         mz_sub  = mz_all[mask]
                         int_sub = corr_all[mask]
                         if len(mz_sub) >= 2:
                             peak_area = float(np.trapz(int_sub, mz_sub))
                             total_area += peak_area
-                            peak_details.append((mz_nom, float(peak_max), peak_area))
+                            peak_details.append((mz_nom, float(peak_max), peak_area,
+                                                 real_mz, mz_lo_bound, mz_hi_bound))
                         else:
-                            peak_details.append((mz_nom, 0.0, 0.0))
+                            peak_details.append((mz_nom, 0.0, 0.0, real_mz, mz_lo_bound, mz_hi_bound))
                     results.append((label, color, peaks, peak_details, total_area))
                 if not results:
                     continue

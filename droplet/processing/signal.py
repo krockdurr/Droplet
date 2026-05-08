@@ -5,6 +5,7 @@ except apply_alpha / overlay_pen which need pyqtgraph/Qt colour objects
 (they are imported lazily so the module can be imported without a QApplication).
 """
 
+import warnings
 import numpy as np
 
 
@@ -62,7 +63,9 @@ def find_peak_bounds(mz_arr, int_arr, mz_nom, noise_floor=0.0,
         return None                  # nothing above noise — skip
 
     try:
-        _, _, left_ips, right_ips = peak_widths(int_arr, [peak_g], rel_height=1.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            _, _, left_ips, right_ips = peak_widths(int_arr, [peak_g], rel_height=1.0)
     except Exception:
         return None
 

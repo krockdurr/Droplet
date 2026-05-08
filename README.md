@@ -74,7 +74,7 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-python Droplet_v2.7.py
+python Droplet_v2.7.1.py
 ```
 
 ---
@@ -104,10 +104,10 @@ pip install -r requirements.txt
 ## Running
 
 ```bash
-python Droplet_v2.7.py
+python Droplet_v2.7.1.py
 ```
 
-On Windows, `Droplet_v2.7.py` can also be launched directly by double-clicking if Python is associated with `.py` files.
+On Windows, `Droplet_v2.7.1.py` can also be launched directly by double-clicking if Python is associated with `.py` files.
 
 ---
 
@@ -137,15 +137,15 @@ The updater:
 
 ---
 
-## Latest Update (v2.7)
+## Latest Update (v2.7.2)
 
 Highlights:
 
-- Fully configurable peak-list legend
-- Redesigned cluster detection table
-- Improved stacked-mode rendering
-- Built-in updater and version checker
-- Improved label positioning and peak highlighting
+- Stacked mode rendering: eliminated flickering and mid-update frozen states when changing labels, zoom, or envelopes
+- Stacked mode symbols: proper vertical stacking for multiple peaks at the same m/z (same row or different rows), matching normal mode behaviour
+- Label position, font size, and angle controls now update stacked mode instantly without a full rebuild
+- Legend window no longer auto-on-top or raised when the main window is focused; closes when the main application closes
+- Peak area CSV exports: `.csv` extension added automatically, `3_sigma_clip_noise_floor` value written in file header
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
 
@@ -242,7 +242,7 @@ Example:
 <summary>Source tree</summary>
 
 ```text
-Droplet_v2.7.py
+Droplet_v2.7.1.py
 VERSION
 updater.py
 test_suite.py
