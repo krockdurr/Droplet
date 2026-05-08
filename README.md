@@ -289,3 +289,19 @@ Built with:
 Released under the MIT License.
 
 See [LICENSE](LICENSE) for details.
+
+---
+
+## Attribution Request
+
+If you use this software in academic work, commercial products, or public projects,  
+the author kindly requests attribution or citation where reasonable.  
+
+Suggested citation:
+
+```textile
+Quentin Betton — Droplet (2026)
+https://github.com/krockdurr/Droplet
+```
+
+This request is not a condition of the MIT License.
