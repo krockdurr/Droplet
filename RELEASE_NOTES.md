@@ -2,9 +2,9 @@
 
 ---
 
-# v2.7.1
+# v2.7.2
 
-> Correction release — stacked mode rendering, symbol stacking, legend window behaviour, and peak area export fixes.
+> Correction release — stacked mode rendering, symbol stacking, legend window behaviour, peak area export fixes, peak-finding robustness on Windows, and peak area noise floor consistency.
 
 ## Bug fixes
 
@@ -46,14 +46,6 @@ The symbol-drawing loop iterated over `groups`, which deduplicates by label. If 
 
 The dialog was created with `parent=None`, so it had no Qt parent-child relationship with the main window and survived after the application closed. Now created with `parent=main_win`; Qt destroys child widgets when the parent is destroyed.
 
-### Batch PNG export crash
-
-`batch_export_plots` referenced `legend_font_spin`, which was removed in v2.7 when the legend font was moved to the **Legend parameters…** dialog. The function now reads the font size directly from settings (`legend/font_pt`), matching the behaviour of the single-file export functions.
-
-### Spurious second legend in PNG / SVG / PDF exports
-
-When the on-screen `PeakListLegendItem` was active, a second fallback `pg.LegendItem` was still being constructed and injected into the plot during export, producing a duplicate legend not visible in the viewing window. The fallback code path has been removed; exports now only scale the legend that is already on screen.
-
 ## Improvements
 
 ### Peak area CSV export: automatic `.csv` extension
@@ -69,6 +61,47 @@ When the on-screen `PeakListLegendItem` was active, a second fallback `pg.Legend
 ```
 
 This applies to both single-file and batch exports.
+
+### Peak area ratio mode: order and persistence
+
+The ratio mode combo box in the Peak Area window previously defaulted to "Between peak lists" on every open. The order is now "Normalized by global spectrum area" first (matching the more common workflow), and the selected mode is saved and restored via QSettings so the preference persists across sessions.
+
+### Peak finding: `scipy.signal.peak_widths` replaced with pure-numpy walk
+
+`find_peak_bounds` previously used `scipy.signal.peak_widths` at `rel_height=1.0` to locate valley-to-valley integration bounds. On Windows with certain NumPy/SciPy builds the fractional-index interpolation returned incorrect bounds, causing peak area integration to yield zero for most peaks.
+
+The function is now a self-contained pure-numpy algorithm:
+
+- Locates all strict local maxima within `±coarse_tol` of the nominal m/z that exceed the noise floor.
+- When multiple candidates are found, picks the one closest to the nominal m/z.
+- Walks left and right from that maximum, stopping at the first point where the signal starts rising again (valley boundary), preventing bounds from crossing into a neighbouring peak.
+- Applies the existing `±max_hw` hard cap in Da.
+
+Behaviour is now identical across all platforms. The `scipy` dependency is unchanged — it is still used elsewhere — but `find_peak_bounds` no longer depends on it.
+
+### Peak area noise floor: inconsistent baseline between manual and batch paths
+
+The batch export path in `PeakAreaWindow._batch_export_folder_ratios` computed the noise floor via `_sigma3_floor(int_all)` — which internally calls `estimate_noise_floor` with `n_sigma=1.0` (not 3.0 as the name implied) and operated on the full spectrum with no m/z threshold. The interactive and single-file ratio paths both used `_correct_spectrum`, which applies `estimate_noise_floor` with `n_sigma=3.0` on data restricted to `mz ≥ 10.9`. This produced different baseline corrections and therefore different integrated areas for the same peaks depending on which path was used.
+
+The batch path now calls `self._correct_spectrum(fdata)` directly, making all three paths (total area, peak-list ratios, batch export) use identical baseline correction.
+
+---
+
+# v2.7.1
+
+> Correction release — fixes and improvements to export and label positioning introduced in v2.7.
+
+## Bug fixes
+
+### Batch PNG export crash
+
+`batch_export_plots` referenced `legend_font_spin`, which was removed in v2.7 when the legend font was moved to the **Legend parameters…** dialog. The function now reads the font size directly from settings (`legend/font_pt`), matching the behaviour of the single-file export functions.
+
+### Spurious second legend in PNG / SVG / PDF exports
+
+When the on-screen `PeakListLegendItem` was active, a second fallback `pg.LegendItem` was still being constructed and injected into the plot during export, producing a duplicate legend not visible in the viewing window. The fallback code path has been removed; exports now only scale the legend that is already on screen.
+
+## Improvements
 
 ### Unified export font scaling
 

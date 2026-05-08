@@ -2,9 +2,7 @@
 
 > Interactive desktop viewer and analysis toolkit for LILBID mass spectrometry data.
 
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+![Python](https://img.shields.io/badge/python-3.10+-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
 ---
 
@@ -74,7 +72,7 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-python Droplet_v2.7.1.py
+python Droplet_v2.7.2.py
 ```
 
 ---
@@ -104,10 +102,10 @@ pip install -r requirements.txt
 ## Running
 
 ```bash
-python Droplet_v2.7.1.py
+python Droplet_v2.7.2.py
 ```
 
-On Windows, `Droplet_v2.7.1.py` can also be launched directly by double-clicking if Python is associated with `.py` files.
+On Windows, `Droplet_v2.7.2.py` can also be launched directly by double-clicking if Python is associated with `.py` files.
 
 ---
 
@@ -137,7 +135,7 @@ The updater:
 
 ---
 
-## Latest Update (v2.7.1)
+## Latest Update (v2.7.2)
 
 Highlights:
 
@@ -146,8 +144,11 @@ Highlights:
 - Label position, font size, and angle controls now update stacked mode instantly without a full rebuild
 - Legend window no longer auto-on-top or raised when the main window is focused; closes when the main application closes
 - Peak area CSV exports: `.csv` extension added automatically, `3_sigma_clip_noise_floor` value written in file header
+- Peak area ratio mode order and selection now persist across sessions via QSettings
+- Peak finding rewritten as pure-numpy valley-walk — fixes zero-area results on Windows and correctly selects the local maximum closest to the nominal m/z when multiple peaks are present
+- Peak area noise floor unified across all measurement paths: manual, ratio, and batch export now use identical 3-sigma baseline correction restricted to m/z ≥ 10.9
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
+See RELEASE_NOTES.md for full details.
 
 ---
 
@@ -156,19 +157,19 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
 ### Main Viewer
 
 <p align="center">
-  <img src="docs/images/main_viewer.png" width="900">
+ <img src="docs/images/main_viewer.png" width="900">
 </p>
 
 ### Stacked Mode
 
 <p align="center">
-  <img src="docs/images/stacked_mode.png" width="900">
+ <img src="docs/images/stacked_mode.png" width="900">
 </p>
 
 ## Plotting Tool
 
 <p align="center">
-  <img src="docs/images/plotting_tool.png" width="900">
+ <img src="docs/images/plotting_tool.png" width="900">
 </p>
 
 ---
@@ -242,7 +243,7 @@ Example:
 <summary>Source tree</summary>
 
 ```text
-Droplet_v2.7.1.py
+Droplet_v2.7.2.py
 VERSION
 updater.py
 test_suite.py
@@ -262,8 +263,8 @@ droplet/
 
 ## Documentation
 
-- [RELEASE_NOTES.md](RELEASE_NOTES.md)
-- [LICENSE](LICENSE)
+- RELEASE_NOTES.md
+- LICENSE
 
 ---
 
@@ -288,14 +289,14 @@ Built with:
 
 Released under the MIT License.
 
-See [LICENSE](LICENSE) for details.
+See LICENSE for details.
 
 ---
 
 ## Attribution Request
 
 If you use this software in academic work, commercial products, or public projects,  
-the author kindly requests attribution or citation where reasonable.  
+the author kindly requests attribution or citation where reasonable.
 
 Suggested citation:
 

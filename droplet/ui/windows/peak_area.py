@@ -491,12 +491,7 @@ class PeakAreaWindow(QtWidgets.QWidget, StayOnTopMixin):
         for fpath in files:
             try:
                 fdata = _a.read_spectrum_file(fpath, sep=sep)
-                mz_all  = fdata['mz'].values
-                int_all = fdata['intensity'].values
-
-                floor = _a._sigma3_floor(int_all)
-                corr_all = int_all - floor
-                corr_all[corr_all < 0] = 0.0
+                mz_all, corr_all, floor = self._correct_spectrum(fdata)
                 results = []
                 for chk, row in self._pl_chks:
                     if not chk.isChecked():
