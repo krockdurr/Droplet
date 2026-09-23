@@ -39,7 +39,7 @@ ZIP_URL        = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/main.zip"
 TIMEOUT        = 30
 ROOT           = Path(__file__).parent.resolve()
 VERSION_FILE   = ROOT / "VERSION"
-DROPLET_PKG    = ROOT / "droplet"
+DROPLET_PKG    = ROOT / "droplet_pkg"
 LAUNCHER_GLOB  = "Droplet_v*.py"
 
 # Files / directories that must never be overwritten or deleted

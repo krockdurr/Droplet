@@ -1,0 +1,6 @@
+PyQt6==6.11.0
+pyqtgraph==0.14.0
+numpy==1.26.4
+scipy==1.16.1
+pandas==2.2.2
+matplotlib==3.10.7

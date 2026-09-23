@@ -2,6 +2,165 @@
 
 ---
 
+# v3.0
+
+> Major release: one-click installers and uninstallers for all platforms, a new project layout, peak-list groups, a peak boundary checker, a peak ratio tool, a residuals preview for manual recalibration, processing metadata in output files, and faster stacked mode.
+
+## Installation and packaging
+
+### One-click installers
+
+New installers set up Droplet with no manual Python steps:
+
+| System  | Installer                        | Launcher created                                   |
+| ------- | -------------------------------- | -------------------------------------------------- |
+| Windows | `Install_Droplet_Windows.bat`    | `Droplet.lnk` on the Desktop (runs via `pythonw`, no console) |
+| macOS   | `Install_Droplet_macOS.command`  | `~/Applications/Droplet.app` bundle with icon      |
+| Linux   | `Install_Droplet_Linux.sh`       | `~/.local/share/applications/Droplet.desktop`      |
+
+Each installer:
+
+- Locates a working Python 3 interpreter: `PATH` first, then common Anaconda / Miniconda locations, plus the `py` launcher and python.org paths on Windows, and Homebrew and python.org framework paths on macOS. It skips the Windows Store stub, and on macOS it uses `/usr/bin/python3` only when the Xcode Command Line Tools are installed.
+- Creates a dedicated virtual environment in `<Droplet folder>/.venv`, so dependencies never collide with system packages, Anaconda's base environment or other projects. A `.venv` whose interpreter no longer runs (e.g. after a Python upgrade) is rebuilt automatically.
+- Bootstraps `pip` via `ensurepip`, and falls back to downloading `get-pip.py`.
+- Installs the pinned `requirements.txt` with `--only-binary=:all:` so an unsupported Python fails fast, then falls back to `requirements_new.txt`.
+- Detects an existing install from its launcher: the **same folder** is updated/repaired; **another Droplet folder** triggers a prompt showing both folders and versions (the other folder is never modified); a **missing folder** is treated as stale and replaced.
+- Stops with a clear dialog when something fails (no Python, Python too old, missing `venv` / `pip`, no network, no write permission).
+
+### Uninstallers
+
+`Uninstall_Droplet_Windows.bat`, `Uninstall_Droplet_macOS.command` and `Uninstall_Droplet_Linux.sh` remove the launcher, then list Droplet's settings and data and offer to remove them (default: keep):
+
+- Qt settings: `HKCU\Software\LILBID\PeakViewer` (Windows), `~/Library/Preferences/com.lilbid.PeakViewer.plist` (macOS, cleared through `defaults delete` so `cfprefsd` cannot write it back), `~/.config/LILBID/PeakViewer.conf` (Linux)
+- Saved legend entries / labels: `~/.droplet`
+- Updater backups: `droplet_backup_*` in the Droplet folder
+
+The Droplet folder and its `.venv` are always left untouched.
+
+### New project layout
+
+| v2.7.x                         | v3.0                                                  |
+| ------------------------------ | ----------------------------------------------------- |
+| `Droplet_v2.7.2.py`            | `Droplet.py` (version-independent launcher name)      |
+| `droplet/`                     | `droplet_pkg/`                                        |
+| `requirements.txt` (`>=` ranges) | `assets/assimilation_guides/requirements.txt` and `requirements_new.txt` (exact pins) |
+| `test_suite.py`                | `assets/test/test_suite.py`                           |
+| —                              | `assets/icons/` (`.ico`, `.icns`, `.png`)             |
+
+The application version is now read from the `VERSION` file only. `updater.py` backs up `droplet_pkg/`.
+
+**Upgrading from v2.x:** install v3.0 into a new folder with the installer, then delete the old folder. Settings, saved legend labels and peak-list files are kept.
+
+## New features
+
+### Peak-list groups
+
+Peak rows can now be organised into named groups in the Peaks window:
+
+- Collapsible group headers, reordered by dragging the `⠿` handle; rows are moved between groups by drag-and-drop, with auto-scroll near the window edges.
+- Per-group controls: highlight on/off, highlight band opacity (*Intensity* slider), and group-wide **L**, **1L** and envelope (`⌒`) toggles. Individual row states are preserved.
+- Shift+click on a row's L / 1L button applies the new state to every row in that group.
+- Deleting a group offers to move its rows to another group.
+- Groups are saved in peak-list `.json` files (new `format_version: 2` with `groups` and `rows`). Old flat-list files still load, into an *Unclassified* group.
+- The **Legend parameters…** dialog lists entries under collapsible group headers, and *Add missing* / *Rebuild* keep the group order.
+
+### Peaks window editing
+
+- Multi-row selection via the selection handle: click, Ctrl (toggle), Shift (range), Ctrl+Shift (extend). Click elsewhere to clear. Multi-row delete.
+- **↑ Above / ↓ Below**: insert blank rows around the selection.
+- **⧉ Dup**: duplicate selected rows below the selection.
+- **+ Group**: add a new group.
+- **⎘ Copy rows / ⎘ Paste rows**: internal clipboard for peak rows.
+- **⊕ Aggregate**: merge the selected rows into one new row with all their m/z values combined, deduplicated and sorted.
+- **Show edited only**: while you edit a row's text field, only that row is shown on the plot.
+- **Search (`Ctrl+F`)**: find bar with next/previous (Enter / Shift+Enter / ↑ / ↓), match counter, *Highlight all*, Esc to close.
+- Text edits and the sigma-clip slider are debounced (300 ms / 400 ms). The plot updates when you pause rather than on every keystroke or slider tick.
+- Only the edited row's highlights are redrawn after a change, instead of the whole plot.
+
+### Peak list overlap check
+
+**⊛ Peak list check**: select one peak list as reference to list every other row sharing at least one m/z value within an adjustable tolerance, grouped by peak-list group. The popup's checkbox, L, 1L and envelope controls stay synced both ways with the Peaks window. Each row has a zoom button (`⊙`) and shows the matching values.
+
+### Peak boundary checker (Peak Area)
+
+Before a ratio CSV is exported (single file or batch), a new dialog shows the baseline-corrected spectrum with one coloured fill per peak:
+
+- Click a fill to select a peak, then click-drag to redefine its integration bounds.
+- Undo / redo (`Ctrl+Z` / `Ctrl+Y`), *Reset all* (`Ctrl+R`), optional peak-maximum dots.
+- In batch mode: *Skip file* or *Cancel* for the whole batch. One dialog is reused across files, so its size and position persist.
+- Areas are then integrated with the confirmed bounds.
+
+The ratio-mode option is now labelled *Between peak lists (normalized to largest)*.
+
+### Peak ratio tool
+
+**Analysis → Measure Peak Ratio [R]…** (or press `R`) opens a floating window. Click two peak apices on the plot (each click snaps to the local apex) to get P1 / P2 and P2 / P1 intensity ratios, with markers drawn on the plot.
+
+### Residuals preview for manual recalibration
+
+Manual recalibration now opens a non-modal **Residuals Preview** window before saving:
+
+- Per-anchor Δm/z plot, coloured per peak list, with hover read-out.
+- Updates live as peaks are toggled in the review window; clicking an anchor scrolls to and highlights its peak row.
+- **Mode → Cascade untoggle**: unchecking a peak also unchecks all higher-mass peaks in the same group.
+- **⇹ Lines**: vertical reference / detected lines with an arrow, shown only when |Δ| ≥ an adjustable threshold.
+- Peaks with the same nominal m/z are kept in sync across groups.
+- **Confirm & Save** proceeds; **Cancel** returns to peak review.
+
+### Residuals viewer
+
+- Searches subfolders recursively for `*_residuals_spectrum.txt` files.
+- Uses one shared colour map per peak list for the dense curve and the anchor bars, read from new `# peak_list_color:<name>=<hex>` headers in residual files.
+- New custom legend: hovering an entry dims the other peak lists.
+- Hover label on the anchor bar chart.
+- The window can be maximised and snapped to screen edges.
+
+### Processing metadata in output files
+
+Processed spectra now record how they were produced as `#key=value` headers, placed before the original file's headers:
+
+- Baseline: `#baseline_method=airPLS` (`lambda`, `porder`, `itermax`) or `SNIP` (`max_hwidth`, `smooth_iters`)
+- Recalibration: `#recalibration_method=auto|manual`, `#recal_polynomial_degree`, `#recal_fitparam_a2/a1/a0`, one `#recal_pair_N=obs->ref` per anchor (manual pairs include `delta`), or `#recal_fallback=linear_scale`
+- ToF → mass: `#tof2mass_unit`, `#tof2mass_ref_times`, `#tof2mass_ref_masses`, `#tof2mass_a`, `#tof2mass_b`, `#tof2mass_r2`
+
+### Stacked mode
+
+- **Dyn Scale** checkbox: ON normalises each spectrum to 0–1 (equal heights); OFF uses raw intensities on a shared Y axis so heights are directly comparable. Persisted in settings.
+- Changing files, sigma clip, log-Y or colours now updates the existing sub-plots in place, with no rebuild and no zoom reset. A full rebuild happens only when the number of spectra changes.
+- Right-click menu: new **Return to last zoom**.
+- The crosshair line is propagated across all sub-plots, with a floating m/z label near the cursor.
+- The grid toggle is honoured, and space is reserved under the last sub-plot so x-axis labels are never clipped.
+- A short overlay notice appears when stacked mode is active with only one file loaded.
+- The stacked-mode checkbox state is restored at startup.
+
+### Display and plot
+
+- **Plot → Show spectrum names legend** toggle (persisted).
+- **Plot → Cursor info font** and **View → m/z cursor font size** controls.
+- The crosshair on/off state is persisted (off by default).
+- The dt filter is persisted across sessions.
+- Plot title parsing: the sample name runs from the token after the date up to the flow-rate token (e.g. `0.22mlpmin`), and the main title is set to `<sample>  -  dt<value>`.
+- Cluster labels containing `_n` are shown with a subscript ₙ in legends, and per-peak indices in cluster labels follow m/z order.
+- Envelope toggle states are saved to settings and restored when no peak file is loaded.
+- Spinboxes show values without trailing zeros.
+
+### Batch PNG export
+
+- Only exports files that match the current mode and dt filters.
+- A pre-scan finds the global intensity maximum so no file gets Y-cropped (skipped when Dyn Scale is on). The X zoom is kept.
+- Progress is shown in the window title (`Exporting i/N: <file>`), which is restored afterwards.
+
+## Bug fixes and robustness
+
+- **NumPy 2 compatibility**: `np.trapz` (removed in NumPy 2) is replaced by `np.trapezoid`, with a fallback for NumPy 1.x.
+- **Peak boundary detection**: the valley walk now tolerates up to 3 consecutive rising points, so small noise blips no longer cut a peak short. The left bound is kept symmetric with the right, so shoulders no longer make highlights lop-sided or swallow neighbouring peaks.
+- **Shutdown crash**: every pyqtgraph `GraphicsWidgetAnchor` (hover label, legends, area result label, stacked sub-labels) is detached before the ViewBoxes are destroyed. This fixes `RuntimeError` on exit, including when closing in stacked mode.
+- Colour changes no longer trigger a full stacked layout rebuild.
+- The dt filter is restored after all other initialisation, so it is no longer overwritten at startup.
+- Removed unused helpers `_sigma3_floor` and `_normalise_and_clip` (superseded by the unified noise floor from v2.7.2).
+
+---
+
 # v2.7.2
 
 > Correction release — stacked mode rendering, symbol stacking, legend window behaviour, peak area export fixes, peak-finding robustness on Windows, and peak area noise floor consistency.
