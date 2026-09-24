@@ -25,7 +25,7 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 
 - Linear and log-Y plotting
 - Stacked multi-spectrum view, with **Dynamic Scaling** (per-spectrum 0–1 normalisation) or shared raw-intensity Y axis
-- Optional spectrum-names legend and configurable peak-list legend
+- Configurable peak-list legend
 - Publication-quality figure export
 
 ### Analysis
@@ -195,7 +195,6 @@ python Droplet.py
 | NumPy      | 2.3.5              | 1.26.4                 |
 | SciPy      | 1.16.1             | 1.16.1                 |
 | pandas     | 2.3.3              | 2.2.2                  |
-| matplotlib | 3.10.7             | 3.10.7                 |
 
 </details>
 
@@ -369,7 +368,6 @@ See [RELEASE_NOTES.md](assets/about/RELEASE_NOTES.md) for full details.
 | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) | Undo / redo peak edits            |
 | `Ctrl+Scroll`                           | Cycle through overlays            |
 | `Ctrl+↑` / `Ctrl+↓`                     | Cycle overlays up / down          |
-| `Ctrl+Shift+T`                          | Open Plotting Tool                |
 | `Ctrl+Shift+C`                          | Copy plot to clipboard            |
 | `Ctrl+Q`                                | Quit                              |
 
@@ -440,7 +438,7 @@ droplet_pkg/                        # the application
 ├── __init__.py                     # APP_VERSION, read from assets/about/VERSION
 ├── app.py                          # main window, menus, plotting, render loop, glue code;
 │                                   #   also ManualRecalWindow, PeakReviewWindow,
-│                                   #   PlottingToolWindow, SavedLabelsImportDialog
+│                                   #   SavedLabelsImportDialog
 ├── constants.py                    # colours, symbols, limits (no dependencies)
 ├── updater.py                      # updater: python -m droplet_pkg.updater
 ├── version_manager.py              # previous versions: python -m droplet_pkg.version_manager
@@ -467,9 +465,8 @@ droplet_pkg/                        # the application
         ├── residuals_viewer.py     # recalibration residuals (Δm/z) browser
         ├── tutorial.py             # first-launch tutorial overlay
         ├── previous_versions.py    # Help → Previous Versions
-        ├── manual_recal.py         # shims for ManualRecalWindow, PeakReviewWindow
-        ├── peak_review.py          #   and PlottingToolWindow (publication figure
-        └── plotting_tool.py        #   editor); the classes live in app.py
+        ├── manual_recal.py         # shims for ManualRecalWindow and
+        └── peak_review.py          #   PeakReviewWindow; the classes live in app.py
 
 assets/
 ├── about/                          # VERSION, LICENSE, RELEASE_NOTES.md
@@ -511,7 +508,6 @@ Built with:
 - NumPy
 - SciPy
 - pandas
-- matplotlib
 
 ---
 

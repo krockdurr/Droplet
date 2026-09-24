@@ -6,6 +6,11 @@ Standalone test runner - launch from the Droplet installation folder:
 
     python test_suite.py            # GUI mode (auto-starts, results shown live)
     python test_suite.py --console  # console-only mode
+    python test_suite.py --console --report FILE   # also write the full report
+
+It can also be opened from Droplet itself: Tests → Run Test Suite…
+The saved report (system information + every result, with the errors in
+full) is what users send when they report a problem.
 
 Categories
 ----------
@@ -32,6 +37,8 @@ import traceback
 import tempfile
 import urllib.request
 import json
+import platform
+from datetime import datetime
 from pathlib import Path
 
 # ── make sure the project root is on the path ────────────────────────────────
@@ -44,6 +51,7 @@ if "DISPLAY" not in os.environ and sys.platform.startswith("linux"):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 GITHUB_REPO     = "krockdurr/Droplet"
+ISSUES_URL      = f"https://github.com/{GITHUB_REPO}/issues"
 EXAMPLE_DIR     = ROOT / "assets" / "example_spectra"
 TIMEOUT         = 10
 
@@ -541,6 +549,9 @@ def tests_calibration() -> list[TestResult]:
 
 # ── 6. Spectrum I/O ───────────────────────────────────────────────────────────
 
+_pgf_app_holder: list = []   # QApplication created by the PGF test in console mode
+
+
 def tests_spectrum_io() -> list[TestResult]:
     results = []
 
@@ -710,6 +721,61 @@ def tests_spectrum_io() -> list[TestResult]:
     results.append(_run("extract_dt from filename",         test_extract_dt))
     results.append(_run("get_available_dt_values",          test_get_available_dt_values))
     results.append(_run("get_txt_files_filtered",           test_get_txt_files_filtered))
+
+    def test_pgf_writer():
+        from PyQt6 import QtWidgets, QtGui, QtCore
+        from droplet_pkg.io.pgf_writer import PgfPaintDevice, latex_escape
+        if QtWidgets.QApplication.instance() is None:        # console mode
+            _pgf_app_holder.append(QtWidgets.QApplication(sys.argv))  # keep it alive
+        assert latex_escape("5% a_b Δm") == r"5\% a\_b $\Delta$m"
+        assert latex_escape("(NaOH)₁₂·OH²⁻") == r"(NaOH)$_{12}$$\cdot$OH$^{2-}$"
+        assert latex_escape("--- a") == r"-{}-{}-{} a", "hyphens must not become a dash"
+        dev = PgfPaintDevice(200, 100, image_prefix="t")
+        p = QtGui.QPainter(dev)
+        p.setPen(QtGui.QPen(QtGui.QColor("red"), 2))
+        p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(x, 50 + (x % 7)) for x in range(0, 200)] * 1))
+        p.drawText(20, 30, "m/z")
+        p.end()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.pgf")
+            dev.save(path)
+            src = open(path, encoding="utf-8").read()
+        assert r"\begin{pgfpicture}" in src and r"\end{pgfpicture}" in src
+        assert r"\pgfqpoint{150bp}{75bp}" in src, "bounding box should be 200x100 px in bp"
+        assert "m/z" in src and r"\pgfusepath{stroke}" in src
+        return f"{src.count(chr(10))} lines"
+    results.append(_run("PGF writer",                        test_pgf_writer))
+
+    def test_peak_list_legend_fields():
+        """Legend keys in peak lists / projects are optional (older versions)."""
+        src = (ROOT / "droplet_pkg" / "app.py").read_text()
+        ns = {}
+        start = src.index("def _row_legend_fields(row) -> dict:")
+        end = src.index("def _legend_symbol_icon(code, color):")
+        exec(compile(src[start:end], "legend_fields", "exec"),
+             {"MARKER_SYMBOL_NAMES": {"o": "", "s": "", "star": ""}}, ns)
+        new_row = lambda: {"legend_symbol": [None], "legend_col": [None]}
+        row = new_row()
+        ns["_apply_row_legend_fields"](row, {"label": "old file, no legend keys"})
+        assert (row["legend_symbol"][0], row["legend_col"][0]) == (None, None)
+        assert ns["_row_legend_fields"](row) == {}, "unset fields must not be written"
+        row = new_row()
+        ns["_apply_row_legend_fields"](row, {"symbol": "star", "legend_col": "2", "legend_show": False})
+        assert (row["legend_symbol"][0], row["legend_col"][0]) == ("star", 2)
+        assert ns["_row_legend_fields"](row) == {"symbol": "star", "legend_col": 2}
+        row = new_row()
+        ns["_apply_row_legend_fields"](row, {"symbol": "no-such-symbol", "legend_col": "x"})
+        assert (row["legend_symbol"][0], row["legend_col"][0]) == (None, None), "invalid values are ignored"
+        return "old files load with defaults; new keys round-trip"
+    results.append(_run("peak-list legend fields (compat)",  test_peak_list_legend_fields))
+
+    def test_example_peak_lists_have_no_legend_keys():
+        """The bundled example peak lists are in the older format on purpose."""
+        for path in EXAMPLE_DIR.glob("peak_list_*.json"):
+            rows = json.loads(path.read_text())["rows"]
+            assert rows and not any("symbol" in r for r in rows), path.name
+        return "still loadable as older-format lists"
+    results.append(_run("example peak lists (older format)", test_example_peak_lists_have_no_legend_keys))
     return results
 
 
@@ -1225,8 +1291,7 @@ def tests_ui_windows() -> list[TestResult]:
         src = (ROOT / "droplet_pkg" / "app.py").read_text()
         for cls_name in ["SavedLabelsImportDialog",
                          "ManualRecalWindow",
-                         "PeakReviewWindow",
-                         "PlottingToolWindow"]:
+                         "PeakReviewWindow"]:
             assert f"class {cls_name}" in src, f"class {cls_name} not found in app.py"
 
     results.append(_run("inline classes defined in app.py", test_inline_classes))
@@ -1683,6 +1748,78 @@ def run_all() -> list[tuple[str, list[TestResult]]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Report (what users send with a bug report)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def system_info() -> list[tuple[str, str]]:
+    """Droplet version, OS, Python and library versions, screens."""
+    info = []
+    try:
+        info.append(("Droplet", VERSION_FILE.read_text().strip()))
+    except OSError:
+        info.append(("Droplet", "unknown (VERSION file missing)"))
+    if os.environ.get("DROPLET_PREVIOUS_VERSION"):
+        info.append(("Started as previous version", os.environ["DROPLET_PREVIOUS_VERSION"]))
+    info.append(("Installation", str(ROOT)))
+    info.append(("Operating system", f"{platform.platform()} ({platform.machine()})"))
+    info.append(("Python", f"{platform.python_version()}  {sys.executable}"))
+    for label, mod, attr in [("PyQt6", "PyQt6.QtCore", "PYQT_VERSION_STR"),
+                             ("Qt", "PyQt6.QtCore", "QT_VERSION_STR"),
+                             ("pyqtgraph", "pyqtgraph", "__version__"),
+                             ("NumPy", "numpy", "__version__"),
+                             ("pandas", "pandas", "__version__"),
+                             ("SciPy", "scipy", "__version__")]:
+        try:
+            import importlib
+            info.append((label, str(getattr(importlib.import_module(mod), attr))))
+        except Exception as exc:
+            info.append((label, f"not available ({type(exc).__name__})"))
+    try:
+        from PyQt6 import QtGui, QtWidgets
+        if QtWidgets.QApplication.instance() is not None:
+            info.append(("Qt platform", QtGui.QGuiApplication.platformName()))
+            for i, scr in enumerate(QtGui.QGuiApplication.screens()):
+                g = scr.geometry()
+                info.append((f"Screen {i + 1}", f"{g.width()}×{g.height()}, "
+                             f"scale {scr.devicePixelRatio():g}, "
+                             f"{scr.logicalDotsPerInch():.0f} dpi"))
+    except Exception:
+        pass
+    return info
+
+
+def build_report(all_results: list[tuple[str, list[TestResult]]]) -> str:
+    """Plain-text report: system information, summary, then every result.
+    Failures are also listed first so they are easy to find."""
+    counts = {PASS: 0, FAIL: 0, SKIP: 0, WARN: 0}
+    for _, results in all_results:
+        for r in results:
+            counts[r.status] = counts.get(r.status, 0) + 1
+    total = sum(counts.values())
+    lines = ["Droplet test report",
+             f"Created {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "",
+             "── System " + "─" * 45]
+    lines += [f"  {k + ':':<28}{v}" for k, v in system_info()]
+    lines += ["", "── Summary " + "─" * 44,
+              f"  Total {total}   ✓ {counts[PASS]} passed   ✗ {counts[FAIL]} failed   "
+              f"⚠ {counts[SKIP] + counts[WARN]} skipped/warned"]
+    failures = [(c, r) for c, results in all_results for r in results if r.status == FAIL]
+    if failures:
+        lines += ["", "── Failures " + "─" * 43]
+        for c, r in failures:
+            lines.append(f"  [{c}]")
+            lines.append(str(r))
+    for category, results in all_results:
+        lines.append(f"\n── {category} {'─' * max(0, 53 - len(category))}")
+        lines += [str(r) for r in results]
+    return "\n".join(lines) + "\n"
+
+
+def default_report_path() -> Path:
+    return Path.home() / f"Droplet_test_report_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Console output
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1722,6 +1859,9 @@ def run_with_gui():
 
     win = QtWidgets.QWidget()
     win.setWindowTitle("Droplet Test Suite")
+    icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
+    if icon.exists():
+        win.setWindowIcon(QtGui.QIcon(str(icon)))
     win.resize(920, 660)
     root = QtWidgets.QVBoxLayout(win)
     root.setSpacing(6)
@@ -1729,8 +1869,17 @@ def run_with_gui():
     # ── header ──
     title = QtWidgets.QLabel(
         "<b style='font-size:14px;'>Droplet Test Suite</b>  "
-        "<span style='color:gray;font-size:10px;'>run from the installation folder</span>")
+        "<span style='color:gray;font-size:10px;'>checks that Droplet works "
+        "correctly on this computer</span>")
     root.addWidget(title)
+    hint = QtWidgets.QLabel(
+        "Having a problem? Save or copy the report once the tests finish, and "
+        f"send it along with your description (e.g. as a <a href='{ISSUES_URL}'>"
+        "GitHub issue</a>). It contains no data from your spectra.")
+    hint.setWordWrap(True)
+    hint.setOpenExternalLinks(True)
+    hint.setStyleSheet("font-size: 11px; color: gray;")
+    root.addWidget(hint)
 
     # ── results table ──
     table = QtWidgets.QTableWidget(0, 4)
@@ -1761,8 +1910,12 @@ def run_with_gui():
     run_btn.setFixedHeight(30)
     save_btn = QtWidgets.QPushButton("Save report…")
     save_btn.setEnabled(False)
+    copy_btn = QtWidgets.QPushButton("Copy report")
+    copy_btn.setToolTip("Copy the full report to the clipboard (to paste in an e-mail or issue)")
+    copy_btn.setEnabled(False)
     btn_row.addWidget(run_btn)
     btn_row.addWidget(save_btn)
+    btn_row.addWidget(copy_btn)
     btn_row.addStretch()
     close_btn = QtWidgets.QPushButton("Close")
     close_btn.clicked.connect(win.close)
@@ -1786,6 +1939,8 @@ def run_with_gui():
                 r.detail.split("\n")[0][:120],
             ]):
                 item = QtWidgets.QTableWidgetItem(text)
+                if r.detail:
+                    item.setToolTip(r.detail)
                 item.setForeground(QtGui.QBrush(
                     QtGui.QColor(_STATUS_COLOR.get(r.status, "#000"))))
                 if col == 0:
@@ -1808,10 +1963,12 @@ def run_with_gui():
             f"Total {total} - ✓ {passed} passed  ✗ {failed} failed  ⚠ {skipped} skipped"
             f"</span>")
         save_btn.setEnabled(bool(_all_results))
+        copy_btn.setEnabled(bool(_all_results))
 
     def start_run():
         run_btn.setEnabled(False)
         save_btn.setEnabled(False)
+        copy_btn.setEnabled(False)
         summary.setText("Running…")
         table.setRowCount(0)
         _all_results.clear()
@@ -1844,18 +2001,25 @@ def run_with_gui():
 
     def save_report():
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            win, "Save Test Report", str(ROOT / "test_report.txt"),
+            win, "Save Test Report", str(default_report_path()),
             "Text Files (*.txt)")
         if not path:
             return
-        lines = []
-        for category, cat_results in _all_results:
-            lines.append(f"\n── {category}")
-            for r in cat_results:
-                lines.append(str(r))
-        Path(path).write_text("\n".join(lines))
+        try:
+            Path(path).write_text(build_report(_all_results), encoding="utf-8")
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(win, "Save Test Report",
+                                          f"Could not save the report:\n{exc}")
+            return
+        summary.setText(summary.text() + f"  —  report saved to {path}")
+
+    def copy_report():
+        QtWidgets.QApplication.clipboard().setText(build_report(_all_results))
+        copy_btn.setText("Copied ✓")
+        QtCore.QTimer.singleShot(1500, lambda: copy_btn.setText("Copy report"))
 
     save_btn.clicked.connect(save_report)
+    copy_btn.clicked.connect(copy_report)
 
     win.show()
     QtCore.QTimer.singleShot(200, start_run)   # auto-start
@@ -1867,8 +2031,15 @@ def run_with_gui():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_console():
+    for k, v in system_info():
+        print(f"  {k + ':':<28}{v}")
     all_results = run_all()
     ok = print_results(all_results)
+    if "--report" in sys.argv:
+        i = sys.argv.index("--report")
+        path = Path(sys.argv[i + 1]) if i + 1 < len(sys.argv) else default_report_path()
+        path.write_text(build_report(all_results), encoding="utf-8")
+        print(f"Report written to {path}")
     sys.exit(0 if ok else 1)
 
 

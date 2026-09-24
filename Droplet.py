@@ -27,4 +27,10 @@ if _here not in sys.path:
 # event loop.  We simply execute it as __main__ so that the if __name__ ==
 # "__main__" guard in app.py (if any) is respected, and all module-level
 # startup code runs.
+# Show the start-up screen right away.  It runs in its own small process, so it
+# keeps animating while this one loads; app.py reports its progress to it and
+# closes it once the main window is ready.
+from droplet_pkg.ui.splash import show_splash
+show_splash()
+
 import droplet_pkg.app  # noqa: F401  - side-effect import: runs the application
