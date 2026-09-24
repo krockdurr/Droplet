@@ -24,18 +24,14 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 ### Visualisation
 
 - Linear and log-Y plotting
-- Dark and bright themes
-- Stacked multi-spectrum view, with **Dyn Scale** (per-spectrum 0–1 normalisation) or shared raw-intensity Y axis
-- Minimap overview overlay
-- Zoom history navigation (including *Return to last zoom* in stacked mode)
+- Stacked multi-spectrum view, with **Dynamic Scaling** (per-spectrum 0–1 normalisation) or shared raw-intensity Y axis
 - Optional spectrum-names legend and configurable peak-list legend
-- Adjustable cursor read-out and m/z cursor label font sizes
 - Publication-quality figure export
 
 ### Analysis
 
 - Peak annotation and label tools
-- Peak-list **groups**: collapsible, drag-and-drop reorderable, with per-group highlight opacity and L / 1L / envelope toggles
+- Peak-list **groups**: collapsible, drag-and-drop reorderable, with per-group highlight opacity and intuitive label modes
 - Peak list search (`Ctrl+F`), copy / paste / duplicate / aggregate rows
 - Peak list overlap check between peak lists
 - Isotopic envelope visualisation
@@ -43,19 +39,19 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 - Peak comparison across spectra
 - Peak area integration with an interactive **peak boundary checker**
 - Two-click **peak intensity ratio** tool (`R`)
-- Residuals viewer
+- Recalibration residuals viewer
 
 ### Processing
 
 - airPLS and SNIP baseline correction
-- Automatic and manual recalibration, with a live **residuals preview** before saving
+- Automatic and manual recalibration, with a live **recalibration residuals preview** before saving
 - Processing parameters (baseline, recalibration fit, ToF → mass) written into output file headers
 - Spectrum normalisation
-- ToF → mass conversion
+- ToF → mass conversion tool (reference peak based)
 
 ### Workflow
 
-- Drag-and-drop loading
+- Drag-and-drop loading & Data folder managing
 - Overlay management
 - Batch processing and batch PNG export (respects mode / dt filters)
 - Session/project save files (`.drp`)
@@ -110,13 +106,16 @@ The installer finds Python on your `PATH`, through the `py` launcher, or in the 
 <summary><b>macOS</b></summary>
 
 1. Open the Droplet folder and double-click **`Install_Droplet_macOS.command`**. A Terminal window opens and runs the installer.
+
 2. If macOS blocks it (*"cannot be opened because it is from an unidentified developer"*), right-click the file → **Open** → **Open**. You can also run it from Terminal:
    
    ```bash
    cd /path/to/Droplet
    bash Install_Droplet_macOS.command
    ```
+
 3. A dialog confirms when installation is complete.
+
 4. Start Droplet from **Droplet** in `~/Applications`, Spotlight or Launchpad. You can drag it to the Dock.
 
 The installer looks for Python on your `PATH`, in Anaconda / Miniconda, Homebrew (`/opt/homebrew`, `/usr/local`) and the python.org framework build. Apple's `/usr/bin/python3` is only used if the Xcode Command Line Tools are installed.
@@ -133,7 +132,9 @@ The installer looks for Python on your `PATH`, in Anaconda / Miniconda, Homebrew
    ```
    
    (or `chmod +x Install_Droplet_Linux.sh` once, then double-click it / choose *Run as a program* in your file manager).
+
 2. A notification or dialog confirms when installation is complete.
+
 3. Start Droplet from your application menu (category *Science*).
 
 If the installer reports that `venv` or `pip` is missing, install them first, for example on Debian / Ubuntu:
@@ -260,9 +261,11 @@ Your settings, saved legend labels and peak-list files are kept: they live outsi
 **Help → Previous Versions…** lists the older releases on GitHub. Select one to **Install**, **Launch** (or double-click) or **Remove** it. Each previous version is downloaded into `previous_versions/<version>/` inside the Droplet folder, with its own Python environment (about 600 MB) holding library versions tested with it. The current version is never changed and remains the one the launcher opens.
 
 - Old releases need their own environment: every 2.x release calls `np.trapz`, which NumPy 2.4 removed.
-- Settings such as the last opened folder are shared between versions.
-- The same is available from a terminal inside the Droplet folder:
 
+- Settings such as the last opened folder are shared between versions.
+
+- The same is available from a terminal inside the Droplet folder:
+  
   ```bash
   .venv/bin/python -m droplet_pkg.version_manager list
   .venv/bin/python -m droplet_pkg.version_manager install v2.7.2
@@ -424,35 +427,62 @@ Processed files carry `#key=value` metadata headers describing what was done, e.
 <summary>Source tree</summary>
 
 ```text
-Droplet.py                        # launcher (run this)
-Install_Droplet_Windows.bat       # installers
+Droplet.py                          # launcher (run this)
+README.md
+Install_Droplet_Windows.bat         # installers
 Install_Droplet_macOS.command
 Install_Droplet_Linux.sh
-Uninstall_Droplet_Windows.bat     # uninstallers
+Uninstall_Droplet_Windows.bat       # uninstallers
 Uninstall_Droplet_macOS.command
 Uninstall_Droplet_Linux.sh
 
-droplet_pkg/
-├── app.py
-├── constants.py
-├── updater.py                    # run with: python -m droplet_pkg.updater
-├── version_manager.py            # previous versions: python -m droplet_pkg.version_manager
+droplet_pkg/                        # the application
+├── __init__.py                     # APP_VERSION, read from assets/about/VERSION
+├── app.py                          # main window, menus, plotting, render loop, glue code;
+│                                   #   also ManualRecalWindow, PeakReviewWindow,
+│                                   #   PlottingToolWindow, SavedLabelsImportDialog
+├── constants.py                    # colours, symbols, limits (no dependencies)
+├── updater.py                      # updater: python -m droplet_pkg.updater
+├── version_manager.py              # previous versions: python -m droplet_pkg.version_manager
 ├── io/
+│   ├── spectrum_reader.py          # read / write spectrum files, separators, # headers
+│   └── file_utils.py               # folder scanning, polarity / dt filters, virtual folders
 ├── processing/
+│   ├── baseline.py                 # airPLS, SNIP, Whittaker smoother
+│   ├── calibration.py              # auto-recalibration (calibrant tables) and manual recal pairs
+│   ├── normalization.py            # normalisation and noise-floor estimate
+│   └── signal.py                   # subtraction, peak bounds, tolerance / shift formulas
 ├── analysis/
+│   ├── peaks.py                    # peak detection (% / SNR) and highlight geometry
+│   └── clusters.py                 # regularly spaced series (cluster) detection
 └── ui/
+    ├── widgets.py                  # reusable widgets (collapsible section, peak rows, …)
+    ├── mixins.py                   # "Pin on top" for popup windows
+    ├── update_checker.py           # starts the updater (startup check, Help menu)
     └── windows/
+        ├── cluster_detection.py    # Analysis → Cluster Detection
+        ├── peak_area.py            # peak areas, ratios and the peak boundary checker
+        ├── peak_comparison.py      # common / unique peaks across spectra
+        ├── peak_confirmation.py    # peak-list confirmation side panel
+        ├── residuals_viewer.py     # recalibration residuals (Δm/z) browser
+        ├── tutorial.py             # first-launch tutorial overlay
+        ├── previous_versions.py    # Help → Previous Versions
+        ├── manual_recal.py         # shims for ManualRecalWindow, PeakReviewWindow
+        ├── peak_review.py          #   and PlottingToolWindow (publication figure
+        └── plotting_tool.py        #   editor); the classes live in app.py
 
 assets/
-├── about/                        # VERSION, LICENSE, RELEASE_NOTES.md
-├── icons/                        # .ico / .icns / .png app icons
-├── assimilation_guides/          # requirements*.txt, Droplet.desktop template,
-│                                 # Windows_install.ps1 / Windows_uninstall.ps1
-├── docs/images/                  # README screenshots
-├── example_spectra/              # example spectra + peak lists (opened on first launch)
+├── about/                          # VERSION, LICENSE, RELEASE_NOTES.md
+├── icons/                          # Droplet_Icon .ico / .icns / .png
+├── assimilation_guides/            # requirements.txt, requirements_new.txt,
+│                                   # Droplet.desktop template,
+│                                   # Windows_install.ps1, Windows_uninstall.ps1
+├── docs/images/                    # README screenshots
+├── example_spectra/                # 5 example spectra, peak lists, expected_values.json,
+│                                   # README.md (opened on first launch)
 └── test/
-    ├── test_suite.py
-    └── generate_example_spectra.py  # regenerates example_spectra/
+    ├── test_suite.py               # python assets/test/test_suite.py [--console]
+    └── generate_example_spectra.py # regenerates example_spectra/
 ```
 
 `.venv/` is created by the installer, `droplet_backup_*/` by the updater and `previous_versions/` by Help → Previous Versions; none of them is part of the repository. Delete `previous_versions/` to remove every installed previous version at once.
