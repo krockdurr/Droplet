@@ -2,58 +2,83 @@
 """
 Droplet Updater
 ===============
-Run from the Droplet installation folder:
+Run from the Droplet installation folder, with Droplet's own Python:
 
-    python updater.py
+    .venv/bin/python updater.py            # check, show the plan, ask, update
+    .venv/bin/python updater.py --check    # only report what would happen
+    .venv/bin/python updater.py --yes      # update without asking
+    .venv/bin/python updater.py --console  # terminal instead of a window
 
 What it does
 ------------
 1. Reads the local version from VERSION.
-2. Fetches the remote VERSION from GitHub; aborts if already up-to-date.
-3. Backs up the current installation to  droplet_backup_YYYYMMDD_HHMMSS/.
+2. Fetches VERSION from the update branch on GitHub (the repository's
+   default branch unless UPDATE_BRANCH is set).
+3. Opens a window telling the user what it is about to do (nothing, or
+   update X → Y) with Update / Cancel buttons.  Falls back to a terminal
+   prompt if Qt cannot be imported.
 4. Updates the code:
-     • If the folder is a git repository → git pull
-     • Otherwise              → download the ZIP from GitHub and extract
-5. Offers to restart Droplet after a successful update.
+     • git clone  → fast-forwards the checked-out branch (no backup needed,
+                    git history is the backup)
+     • otherwise  → downloads the branch ZIP, backs up every file/folder it
+                    is about to overwrite to droplet_backup_YYYYMMDD_HHMMSS/,
+                    then copies the new files in.
 
-A simple PyQt6 window shows progress; falls back to console-only if Qt
-is not importable (e.g. called from a minimal environment).
+Using it from Droplet (later)
+-----------------------------
+The logic is split into two UI-independent steps so a GUI can reuse them:
+
+    plan = check_for_update()      # network only, changes nothing
+    plan.needed / plan.describe()  # show this to the user
+    apply_update(plan, log=...)    # does the update, raises UpdateError
+
+Both calls block, so run them outside the Qt main thread and forward
+`log` messages through a signal (run_gui() below does exactly this and
+its dialog can be lifted into Droplet).  Because apply_update() overwrites
+Droplet's own files, the safest pattern for the GUI is to ask the user,
+then launch `python updater.py --yes` as a separate process and quit.
 """
 
-import os
-import sys
+import argparse
+import json
 import shutil
 import subprocess
-import urllib.request
-import urllib.error
-import zipfile
+import sys
 import tempfile
-from pathlib import Path
+import urllib.request
+import zipfile
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from typing import Callable
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# ── configuration ─────────────────────────────────────────────────────────────
 
-GITHUB_REPO    = "krockdurr/Droplet"
-VERSION_URL    = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
-ZIP_URL        = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/main.zip"
-TIMEOUT        = 30
-ROOT           = Path(__file__).parent.resolve()
-VERSION_FILE   = ROOT / "VERSION"
-DROPLET_PKG    = ROOT / "droplet_pkg"
-LAUNCHER_GLOB  = "Droplet_v*.py"
+GITHUB_REPO   = "krockdurr/Droplet"
+# "HEAD" means the repository's default branch; set a branch name to pin one.
+UPDATE_BRANCH = "HEAD"
+TIMEOUT       = 30
+ROOT          = Path(__file__).parent.resolve()
+VERSION_FILE  = ROOT / "VERSION"
+BACKUP_PREFIX = "droplet_backup_"
 
-# Files / directories that must never be overwritten or deleted
-PROTECTED = {
-    "updater.py",
-    ".git",
-    ".gitignore",
-    "LICENSE",
-}
+# Top-level entries the ZIP update never touches.
+PROTECTED = {".git", ".venv"}
+# Top-level folders replaced wholesale, so files removed upstream disappear.
+# Every other folder is merged: new files are copied in, extra local files stay.
+REPLACED_DIRS = {"droplet_pkg"}
+
+Log = Callable[[str], None]
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+class UpdateError(Exception):
+    """Raised when checking for or applying an update fails."""
+
+
+# ── versions ──────────────────────────────────────────────────────────────────
 
 def _to_tuple(v: str) -> tuple[int, ...]:
+    """'2.6.5' → (2, 6, 5).  Non-numeric parts become 0."""
     parts = []
     for seg in v.strip().split("."):
         try:
@@ -63,264 +88,467 @@ def _to_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+def is_newer(remote: str, local: str) -> bool:
+    """True if `remote` is a higher version than `local` ('3.0' == '3.0.0')."""
+    r, l = _to_tuple(remote), _to_tuple(local)
+    width = max(len(r), len(l))
+    return r + (0,) * (width - len(r)) > l + (0,) * (width - len(l))
+
+
 def local_version() -> str:
     if VERSION_FILE.exists():
-        return VERSION_FILE.read_text().strip()
-    # fallback: read from package __init__
-    init = DROPLET_PKG / "__init__.py"
-    if init.exists():
-        for line in init.read_text().splitlines():
-            if "APP_VERSION" in line and "=" in line:
-                return line.split("=")[1].strip().strip('"').strip("'")
+        return VERSION_FILE.read_text().strip() or "0.0.0"
     return "0.0.0"
 
 
-def fetch_remote_version() -> str:
-    with urllib.request.urlopen(VERSION_URL, timeout=TIMEOUT) as r:
+# ── GitHub access ─────────────────────────────────────────────────────────────
+
+def _urlopen(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "Droplet-updater"})
+    return urllib.request.urlopen(req, timeout=TIMEOUT)
+
+
+def resolve_branch() -> str:
+    """Name of the branch updates come from ('HEAD' if it cannot be resolved)."""
+    if UPDATE_BRANCH != "HEAD":
+        return UPDATE_BRANCH
+    try:
+        with _urlopen(f"https://api.github.com/repos/{GITHUB_REPO}") as r:
+            return json.load(r)["default_branch"]
+    except Exception:
+        # API unreachable or rate-limited: raw/archive URLs also accept HEAD.
+        return "HEAD"
+
+
+def fetch_remote_version(branch: str) -> str:
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/VERSION"
+    with _urlopen(url) as r:
         return r.read().decode().strip()
 
 
+def zip_url(branch: str) -> str:
+    return f"https://github.com/{GITHUB_REPO}/archive/{branch}.zip"
+
+
+# ── step 1: check ─────────────────────────────────────────────────────────────
+
 def is_git_repo() -> bool:
-    return (ROOT / ".git").is_dir()
+    return (ROOT / ".git").is_dir() and shutil.which("git") is not None
 
 
-def backup_current(log) -> Path:
-    stamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest   = ROOT / f"droplet_backup_{stamp}"
-    log(f"Backing up current installation → {dest.name}/")
-    shutil.copytree(DROPLET_PKG, dest / "droplet")
-    if VERSION_FILE.exists():
-        shutil.copy2(VERSION_FILE, dest / "VERSION")
-    # copy launcher(s)
-    for lp in ROOT.glob(LAUNCHER_GLOB):
-        shutil.copy2(lp, dest / lp.name)
-    log("Backup complete.")
+@dataclass
+class UpdatePlan:
+    local_version: str
+    remote_version: str
+    branch: str
+    method: str  # "git" or "zip"
+    # Set when an update is available but cannot be applied automatically.
+    blocker: str | None = None
+
+    @property
+    def needed(self) -> bool:
+        return is_newer(self.remote_version, self.local_version)
+
+    def describe(self) -> str:
+        lines = [
+            f"Installed version: {self.local_version}",
+            f"Latest version: {self.remote_version}  "
+            f"(github.com/{GITHUB_REPO}, branch {self.branch})",
+            "",
+        ]
+        if not self.needed:
+            lines.append("Droplet is up to date. Nothing to do.")
+        elif self.blocker:
+            lines.append(f"An update is available but cannot be applied "
+                         f"automatically: {self.blocker}")
+        elif self.method == "git":
+            lines.append(f"Droplet will be updated {self.local_version} → "
+                         f"{self.remote_version} with 'git pull --ff-only'.")
+        else:
+            lines.append(f"Droplet will be updated {self.local_version} → "
+                         f"{self.remote_version} by downloading the ZIP from "
+                         f"GitHub.")
+            lines.append(f"Files that get replaced are first backed up to a "
+                         f"{BACKUP_PREFIX}<date>_<time> folder inside the "
+                         f"Droplet folder.")
+        return "\n".join(lines)
+
+
+def check_for_update() -> UpdatePlan:
+    """Compare the local and remote versions.  Changes nothing on disk."""
+    branch = resolve_branch()
+    try:
+        remote = fetch_remote_version(branch)
+    except Exception as exc:
+        raise UpdateError(f"Could not read the remote version: {exc}") from exc
+    if not remote:
+        raise UpdateError("The remote VERSION file is empty.")
+
+    method, blocker = "zip", None
+    if is_git_repo():
+        method = "git"
+        current = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if branch != "HEAD" and current != branch:
+            blocker = (f"this clone is on branch '{current}', but updates come "
+                       f"from '{branch}'. Switch branch with git yourself.")
+    return UpdatePlan(local_version=local_version(), remote_version=remote,
+                      branch=branch, method=method, blocker=blocker)
+
+
+# ── step 2: apply ─────────────────────────────────────────────────────────────
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(ROOT), *args],
+                          capture_output=True, text=True, timeout=120)
+
+
+def update_via_git(log: Log):
+    log("Running git pull --ff-only …")
+    try:
+        result = _git("pull", "--ff-only")
+    except subprocess.TimeoutExpired as exc:
+        raise UpdateError("git pull timed out.") from exc
+    if result.stdout.strip():
+        log(result.stdout.strip())
+    if result.returncode != 0:
+        raise UpdateError(f"git pull failed:\n{result.stderr.strip()}")
+
+
+def _download_release(branch: str, dest: Path, log: Log) -> Path:
+    """Download and extract the branch ZIP into `dest`; return its root folder."""
+    url = zip_url(branch)
+    log(f"Downloading {url} …")
+    zip_path = dest / "droplet_update.zip"
+    try:
+        with _urlopen(url) as r, open(zip_path, "wb") as f:
+            shutil.copyfileobj(r, f)
+    except Exception as exc:
+        raise UpdateError(f"Download failed: {exc}") from exc
+
+    log("Extracting …")
+    extract_dir = dest / "extracted"
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(extract_dir)
+    except zipfile.BadZipFile as exc:
+        raise UpdateError(f"Downloaded file is not a valid ZIP: {exc}") from exc
+
+    # GitHub archives contain a single top-level folder, e.g. Droplet-v3.0/
+    roots = [p for p in extract_dir.iterdir() if p.is_dir()]
+    if len(roots) != 1:
+        raise UpdateError("Unexpected ZIP layout, aborting.")
+    return roots[0]
+
+
+def _entries_to_install(src_root: Path) -> list[Path]:
+    return [item for item in src_root.iterdir()
+            if item.name not in PROTECTED
+            and not item.name.startswith(BACKUP_PREFIX)]
+
+
+def backup_entries(names: list[str], log: Log) -> Path:
+    """Copy the listed top-level entries of the install to a backup folder."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = ROOT / f"{BACKUP_PREFIX}{stamp}"
+    log(f"Backing up files that will be replaced → {dest.name}/")
+    dest.mkdir()
+    for name in names:
+        src = ROOT / name
+        if src.is_dir():
+            shutil.copytree(src, dest / name,
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        elif src.exists():
+            shutil.copy2(src, dest / name)
     return dest
 
 
-def update_via_git(log) -> bool:
-    log("Git repository detected — running git pull …")
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(ROOT), "pull", "--ff-only"],
-            capture_output=True, text=True, timeout=60)
-        log(result.stdout.strip() or "(no output)")
-        if result.returncode != 0:
-            log(f"git pull failed:\n{result.stderr.strip()}")
-            return False
-        log("git pull succeeded.")
-        return True
-    except FileNotFoundError:
-        log("git executable not found — falling back to ZIP download.")
-        return False
-    except subprocess.TimeoutExpired:
-        log("git pull timed out.")
-        return False
+def _install(src_root: Path, entries: list[Path]):
+    for item in entries:
+        dest = ROOT / item.name
+        if item.is_dir():
+            if item.name in REPLACED_DIRS and dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
 
 
-def update_via_zip(log) -> bool:
-    log(f"Downloading {ZIP_URL} …")
+def update_via_zip(plan: UpdatePlan, log: Log):
     with tempfile.TemporaryDirectory() as tmp:
-        zip_path = Path(tmp) / "droplet_update.zip"
+        # Download first, so a network failure leaves the install untouched.
+        src_root = _download_release(plan.branch, Path(tmp), log)
+        entries = _entries_to_install(src_root)
         try:
-            urllib.request.urlretrieve(ZIP_URL, zip_path)
+            backup = backup_entries([e.name for e in entries], log)
         except Exception as exc:
-            log(f"Download failed: {exc}")
-            return False
-
-        log("Extracting …")
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(tmp)
-
-        # The zip contains a single top-level folder: Droplet-main/
-        extracted_roots = [
-            p for p in Path(tmp).iterdir()
-            if p.is_dir() and p.name != "__MACOSX"
-        ]
-        if not extracted_roots:
-            log("Could not find extracted folder — aborting.")
-            return False
-        src_root = extracted_roots[0]
+            raise UpdateError(f"Backup failed ({exc}); nothing was changed.") from exc
 
         log("Copying new files …")
-        # Copy everything except protected entries
-        for item in src_root.iterdir():
-            if item.name in PROTECTED:
-                continue
-            dest = ROOT / item.name
-            if item.is_dir():
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(item, dest)
-            else:
-                shutil.copy2(item, dest)
-
-        log("File copy complete.")
-    return True
+        try:
+            _install(src_root, entries)
+        except Exception as exc:
+            raise UpdateError(
+                f"Copying failed: {exc}\n"
+                f"The previous files are in {backup.name}/ — copy them back "
+                f"into {ROOT} to restore.") from exc
 
 
-def find_launcher() -> Path | None:
-    launchers = sorted(ROOT.glob(LAUNCHER_GLOB))
-    return launchers[-1] if launchers else None
-
-
-def restart_app(log):
-    launcher = find_launcher()
-    if launcher is None:
-        log("No launcher script found — please restart Droplet manually.")
+def apply_update(plan: UpdatePlan, log: Log = print):
+    """Perform the update described by `plan`.  Raises UpdateError on failure."""
+    if not plan.needed:
+        log("Already up to date. Nothing to do.")
         return
-    log(f"Restarting {launcher.name} …")
-    os.execv(sys.executable, [sys.executable, str(launcher)])
+    if plan.blocker:
+        raise UpdateError(plan.blocker)
+    if plan.method == "git":
+        update_via_git(log)
+    else:
+        update_via_zip(plan, log)
+
+    installed = local_version()
+    if is_newer(plan.remote_version, installed):
+        raise UpdateError(f"Update finished but VERSION still says {installed} "
+                          f"(expected {plan.remote_version}).")
+    log(f"Update complete. Droplet is now at version {installed}.")
 
 
-# ── Qt GUI updater ─────────────────────────────────────────────────────────────
+AFTER_UPDATE = ("Run the installer for your system again so the dependencies "
+                "and launcher match the new version, then restart Droplet.")
 
-def run_with_qt():
+
+# ── Qt front-end ──────────────────────────────────────────────────────────────
+
+def run_gui(check_only: bool = False, auto_confirm: bool = False) -> int:
+    """Show the updater window.  Raises ImportError if no Qt binding exists."""
     try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
+        from PyQt6 import QtCore, QtGui, QtWidgets
     except ImportError:
-        from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
+        from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+    Signal = getattr(QtCore, "pyqtSignal", None) or QtCore.Signal
 
-    qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    class _Task(QtCore.QThread):
+        """Runs fn(log) off the GUI thread; results come back as signals."""
+        log       = Signal(str)
+        succeeded = Signal(object)
+        failed    = Signal(str)
 
-    win = QtWidgets.QDialog()
-    win.setWindowTitle("Droplet Updater")
-    win.setMinimumWidth(520)
-    win.setMinimumHeight(340)
-    win.setWindowFlag(QtCore.Qt.WindowType.WindowContextHelpButtonHint, False)
-
-    lay = QtWidgets.QVBoxLayout(win)
-    lay.setSpacing(8)
-
-    title = QtWidgets.QLabel("<b style='font-size:14px;'>Droplet Updater</b>")
-    lay.addWidget(title)
-
-    log_box = QtWidgets.QPlainTextEdit()
-    log_box.setReadOnly(True)
-    log_box.setFont(QtGui.QFont("Monospace", 9))
-    log_box.setMinimumHeight(180)
-    lay.addWidget(log_box)
-
-    progress = QtWidgets.QProgressBar()
-    progress.setRange(0, 0)   # indeterminate
-    progress.setVisible(False)
-    lay.addWidget(progress)
-
-    btn_row = QtWidgets.QHBoxLayout()
-    update_btn  = QtWidgets.QPushButton("Check & Update")
-    restart_btn = QtWidgets.QPushButton("Restart Droplet")
-    restart_btn.setEnabled(False)
-    close_btn   = QtWidgets.QPushButton("Close")
-    btn_row.addWidget(update_btn)
-    btn_row.addWidget(restart_btn)
-    btn_row.addStretch()
-    btn_row.addWidget(close_btn)
-    lay.addLayout(btn_row)
-
-    close_btn.clicked.connect(win.close)
-    restart_btn.clicked.connect(lambda: (win.close(), restart_app(log)))
-
-    _success = [False]
-
-    def log(msg: str):
-        log_box.appendPlainText(msg)
-        qt_app.processEvents()
-
-    class _Worker(QtCore.QThread):
-        done = QtCore.pyqtSignal(bool)
+        def __init__(self, fn, parent=None):
+            super().__init__(parent)
+            self._fn = fn
 
         def run(self):
-            ok = _do_update(log)
-            self.done.emit(ok)
+            try:
+                self.succeeded.emit(self._fn(self.log.emit))
+            except UpdateError as exc:
+                self.failed.emit(str(exc))
+            except Exception as exc:
+                self.failed.emit(f"Unexpected error: {exc}")
 
-    _worker = [None]
+    class UpdaterDialog(QtWidgets.QDialog):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("Droplet Updater")
+            icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
+            if icon.exists():
+                self.setWindowIcon(QtGui.QIcon(str(icon)))
+            self.exit_code = 0
+            self._plan: UpdatePlan | None = None
+            self._task: _Task | None = None
 
-    def _start():
-        update_btn.setEnabled(False)
-        progress.setVisible(True)
+            lay = QtWidgets.QVBoxLayout(self)
+            lay.setSpacing(10)
+            # Window always fits its content as messages change.
+            lay.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
 
-        w = _Worker()
-        _worker[0] = w
+            self._title = QtWidgets.QLabel()
+            self._title.setStyleSheet("font-size: 14px; font-weight: bold;")
+            lay.addWidget(self._title)
 
-        def _finished(ok):
-            progress.setVisible(False)
-            _success[0] = ok
-            if ok:
-                restart_btn.setEnabled(True)
+            self._message = QtWidgets.QLabel()
+            self._message.setWordWrap(True)
+            self._message.setMinimumWidth(500)
+            self._message.setTextInteractionFlags(
+                QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            lay.addWidget(self._message)
 
-        w.done.connect(_finished)
-        w.start()
+            self._log = QtWidgets.QPlainTextEdit()
+            self._log.setReadOnly(True)
+            self._log.setFont(QtGui.QFontDatabase.systemFont(
+                QtGui.QFontDatabase.SystemFont.FixedFont))
+            self._log.setMinimumSize(500, 160)
+            self._log.hide()
+            lay.addWidget(self._log)
 
-    update_btn.clicked.connect(_start)
+            self._progress = QtWidgets.QProgressBar()
+            self._progress.setRange(0, 0)  # indeterminate
+            self._progress.setTextVisible(False)
+            lay.addWidget(self._progress)
 
-    # Auto-start the check
-    QtCore.QTimer.singleShot(200, _start)
+            buttons = QtWidgets.QHBoxLayout()
+            buttons.addStretch()
+            self._primary = QtWidgets.QPushButton()
+            self._primary.clicked.connect(self._on_primary)
+            self._close = QtWidgets.QPushButton("Cancel")
+            self._close.clicked.connect(self.reject)
+            buttons.addWidget(self._primary)
+            buttons.addWidget(self._close)
+            lay.addLayout(buttons)
 
-    win.exec()
+            self._start_check()
+
+        # ── state changes ──
+
+        def _busy(self, busy: bool):
+            self._progress.setVisible(busy)
+            self._primary.setEnabled(not busy)
+            self._close.setEnabled(not busy)
+
+        def _run(self, fn, on_success, on_failure):
+            self._task = _Task(fn, self)
+            self._task.log.connect(self._append_log)
+            self._task.succeeded.connect(on_success)
+            self._task.failed.connect(on_failure)
+            self._busy(True)
+            self._task.start()
+
+        def _start_check(self):
+            self._title.setText("Checking for updates …")
+            self._message.setText(f"Contacting github.com/{GITHUB_REPO} …")
+            self._primary.hide()
+            self._run(lambda log: check_for_update(),
+                      self._on_checked, self._on_check_failed)
+
+        def _on_checked(self, plan: UpdatePlan):
+            self._busy(False)
+            self._plan = plan
+            self._message.setText(plan.describe())
+            if not plan.needed:
+                self._title.setText("Droplet is up to date")
+                self._close.setText("Close")
+            elif plan.blocker:
+                self._title.setText("Update available")
+                self._close.setText("Close")
+                self.exit_code = 1
+            elif check_only:
+                self._title.setText("Update available")
+                self._close.setText("Close")
+            else:
+                self._title.setText("Update available")
+                self._primary.setText("Update")
+                self._primary.show()
+                self._primary.setDefault(True)
+                self._close.setText("Cancel")
+                if auto_confirm:
+                    self._start_update()
+
+        def _on_check_failed(self, msg: str):
+            self._busy(False)
+            self.exit_code = 1
+            self._title.setText("Could not check for updates")
+            self._message.setText(msg)
+            self._primary.setText("Retry")
+            self._primary.show()
+            self._close.setText("Close")
+
+        def _on_primary(self):
+            if self._plan is not None and self._plan.needed:
+                self._start_update()
+            else:
+                self.exit_code = 0
+                self._start_check()
+
+        def _start_update(self):
+            self._title.setText(f"Updating to {self._plan.remote_version} …")
+            self._log.show()
+            self._primary.hide()
+            self._run(lambda log: apply_update(self._plan, log),
+                      self._on_updated, self._on_update_failed)
+
+        def _on_updated(self, _):
+            self._busy(False)
+            self.exit_code = 0
+            self._title.setText("Update complete")
+            self._message.setText(AFTER_UPDATE)
+            self._close.setText("Close")
+
+        def _on_update_failed(self, msg: str):
+            self._busy(False)
+            self.exit_code = 1
+            self._title.setText("Update failed")
+            self._message.setText(msg)
+            self._close.setText("Close")
+
+        def _append_log(self, msg: str):
+            self._log.appendPlainText(msg)
+
+        def reject(self):
+            # Never close in the middle of a check or an update.
+            if self._task is not None and self._task.isRunning():
+                return
+            super().reject()
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    dialog = UpdaterDialog()
+    dialog.exec()
+    return dialog.exit_code
 
 
-# ── core logic (shared between Qt and console) ────────────────────────────────
+# ── console front-end ─────────────────────────────────────────────────────────
 
-def _do_update(log) -> bool:
-    lv = local_version()
-    log(f"Local version  : {lv}")
-
-    log("Checking remote version …")
+def _confirm(question: str) -> bool:
     try:
-        rv = fetch_remote_version()
-    except Exception as exc:
-        log(f"Could not reach GitHub: {exc}")
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
         return False
-    log(f"Remote version : {rv}")
 
-    if _to_tuple(rv) <= _to_tuple(lv):
-        log("Already up-to-date. Nothing to do.")
-        return True
 
-    log(f"New version available: {rv}  (you have {lv})")
+def run_console(check_only: bool = False, auto_confirm: bool = False) -> int:
+    print("Checking for updates …")
+    try:
+        plan = check_for_update()
+    except UpdateError as exc:
+        print(exc)
+        return 1
+
+    print()
+    print(plan.describe())
+    print()
+    if plan.needed and plan.blocker:
+        return 1
+    if not plan.needed or check_only:
+        return 0
+    if not auto_confirm and not _confirm("Proceed with the update?"):
+        print("Update cancelled. Nothing was changed.")
+        return 0
 
     try:
-        backup_current(log)
-    except Exception as exc:
-        log(f"Backup failed: {exc}")
-        log("Aborting update to be safe.")
-        return False
+        apply_update(plan)
+    except UpdateError as exc:
+        print(f"\nUpdate FAILED: {exc}")
+        return 1
 
-    if is_git_repo():
-        ok = update_via_git(log)
-        if not ok:
-            ok = update_via_zip(log)
-    else:
-        ok = update_via_zip(log)
-
-    if ok:
-        new_lv = local_version()
-        log(f"\nUpdate complete!  New version: {new_lv}")
-    else:
-        log("\nUpdate FAILED. Your backup is still intact.")
-
-    return ok
+    print(f"\n{AFTER_UPDATE}")
+    return 0
 
 
-# ── console fallback ──────────────────────────────────────────────────────────
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Update Droplet from GitHub.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--check", action="store_true",
+                       help="only report whether an update is available")
+    group.add_argument("--yes", "-y", action="store_true",
+                       help="update without asking for confirmation")
+    parser.add_argument("--console", action="store_true",
+                        help="use the terminal instead of a window")
+    args = parser.parse_args(argv)
 
-def run_console():
-    def log(msg: str):
-        print(msg)
+    if not args.console:
+        try:
+            return run_gui(check_only=args.check, auto_confirm=args.yes)
+        except ImportError:
+            print("Qt is not available, falling back to the terminal.\n")
+    return run_console(check_only=args.check, auto_confirm=args.yes)
 
-    ok = _do_update(log)
-    if ok:
-        ans = input("\nRestart Droplet now? [y/N] ").strip().lower()
-        if ans == "y":
-            restart_app(log)
-    sys.exit(0 if ok else 1)
-
-
-# ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    try:
-        run_with_qt()
-    except Exception:
-        # Qt not available or crashed — fall back to console
-        run_console()
+    sys.exit(main())

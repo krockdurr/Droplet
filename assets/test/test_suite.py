@@ -1185,23 +1185,21 @@ def tests_updater() -> list[TestResult]:
         assert isinstance(result, bool)
         return f"is_git_repo = {result}"
 
-    def test_find_launcher():
+    def test_updater_version_comparison():
         import importlib.util
         spec = importlib.util.spec_from_file_location("updater", ROOT / "updater.py")
         mod  = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        result = mod.find_launcher()
-        # May be None if no launcher script exists; that is valid
-        assert result is None or result.exists(), \
-            f"find_launcher returned non-existent path: {result}"
-        return f"launcher = {result}"
+        assert mod.is_newer("2.6.6", "2.6.5")
+        assert mod.is_newer("2.6.5.1", "2.6.5")
+        assert not mod.is_newer("3.0.0", "3.0")
+        assert not mod.is_newer("3.0", "3.0.0")
 
     def test_remote_version_fetch():
-        from droplet_pkg.ui.update_checker import _FetchThread
         try:
             import urllib.request
             with urllib.request.urlopen(
-                    f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION",
+                    f"https://raw.githubusercontent.com/{GITHUB_REPO}/HEAD/VERSION",
                     timeout=TIMEOUT) as r:
                 ver = r.read().decode().strip()
             assert ver, "Remote VERSION file is empty"
@@ -1213,7 +1211,7 @@ def tests_updater() -> list[TestResult]:
     results.append(_run("version comparison edge cases",     test_version_comparison_edge_cases))
     results.append(_run("updater _to_tuple + local_version", test_updater_helpers))
     results.append(_run("is_git_repo detection",             test_is_git_repo))
-    results.append(_run("find_launcher",                     test_find_launcher))
+    results.append(_run("updater version comparison",        test_updater_version_comparison))
     # Inline so network failures become SKIPs rather than FAILs.
     t0 = time.perf_counter()
     try:
