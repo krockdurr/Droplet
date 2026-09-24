@@ -4,7 +4,7 @@
 # - Then asks whether to also remove Droplet's settings and user data:
 #     ~/Library/Preferences/com.lilbid.PeakViewer.plist   (Qt QSettings)
 #     ~/.droplet/                                         (legend entries / labels)
-#     droplet_backup_* folders created by updater.py in the Droplet folder
+#     droplet_backup_* folders created by the updater in the Droplet folder
 # The .venv, Droplet.py and the rest of the repo are always left untouched.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

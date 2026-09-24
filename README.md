@@ -61,6 +61,7 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 - Session/project save files (`.drp`)
 - Background update checking
 - Built-in updater utility
+- Install and launch previous versions side by side (Help → Previous Versions…)
 
 ---
 
@@ -183,8 +184,6 @@ pip install -r assets/assimilation_guides/requirements.txt
 python Droplet.py
 ```
 
-Always start `Droplet.py` **from inside the Droplet folder**, because Droplet reads its `VERSION` file from the current working directory.
-
 <details>
 <summary>Pinned dependencies</summary>
 
@@ -217,23 +216,27 @@ From a terminal, inside the Droplet folder:
 .venv\Scripts\python Droplet.py
 ```
 
+### Example data
+
+On first launch Droplet opens `assets/example_spectra/`. It holds five synthetic LILBID spectra with known answers: raw negative- and positive-mode water calibrants for auto-recalibration and baseline correction, a NaCl spectrum for cluster and isotope-envelope detection, a peak area / ratio standard, and a later-delay-time water spectrum for comparisons. Matching peak lists are included. See [its README](assets/example_spectra/README.md) for what each file tests. The polarity filter starts on **neg**; switch to **pos** or **All** to see every file.
+
 ---
 
 ## Updating
 
-From inside the Droplet folder, run the updater with Droplet's own Python:
+Each time Droplet starts, it checks GitHub in the background and opens the updater window only if a newer version is available. You can also open the updater at any time from **Help → Check for Updates…**, or run it from inside the Droplet folder with Droplet's own Python:
 
 ```bash
 # macOS / Linux
-.venv/bin/python updater.py
+.venv/bin/python -m droplet_pkg.updater
 
 # Windows
-.venv\Scripts\python updater.py
+.venv\Scripts\python -m droplet_pkg.updater
 ```
 
 The updater:
 
-- compares the local `VERSION` with the one on the repository's default branch
+- compares the local version (`assets/about/VERSION`) with the one on the repository's default branch
 - opens a window showing what it is about to do (nothing, or update X → Y), with **Update** / **Cancel** buttons; nothing changes until you click Update
 - updates via `git pull --ff-only` (cloned folder) or by downloading the ZIP from GitHub
 - in ZIP mode, backs up every file it replaces to `droplet_backup_YYYYMMDD_HHMMSS/`
@@ -251,6 +254,21 @@ Version 3.0 changes the folder layout (`Droplet_v2.7.2.py` → `Droplet.py`, `dr
 3. Delete the old v2.x folder once you are happy with the new one.
 
 Your settings, saved legend labels and peak-list files are kept: they live outside the Droplet folder, and peak-list `.json` files from v2.x load into v3.0 (their rows are placed in an *Unclassified* group).
+
+### Previous versions
+
+**Help → Previous Versions…** lists the older releases on GitHub. Select one to **Install**, **Launch** (or double-click) or **Remove** it. Each previous version is downloaded into `previous_versions/<version>/` inside the Droplet folder, with its own Python environment (about 600 MB) holding library versions tested with it. The current version is never changed and remains the one the launcher opens.
+
+- Old releases need their own environment: every 2.x release calls `np.trapz`, which NumPy 2.4 removed.
+- Settings such as the last opened folder are shared between versions.
+- The same is available from a terminal inside the Droplet folder:
+
+  ```bash
+  .venv/bin/python -m droplet_pkg.version_manager list
+  .venv/bin/python -m droplet_pkg.version_manager install v2.7.2
+  .venv/bin/python -m droplet_pkg.version_manager launch v2.7.2
+  .venv/bin/python -m droplet_pkg.version_manager remove v2.7.2
+  ```
 
 ---
 
@@ -308,7 +326,7 @@ Highlights:
 - Stacked mode: **Dyn Scale** toggle, fast in-place updates without rebuilding, *Return to last zoom*
 - NumPy 2 compatibility, more robust peak-boundary detection, and a shutdown crash fix
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for full details.
+See [RELEASE_NOTES.md](assets/about/RELEASE_NOTES.md) for full details.
 
 ---
 
@@ -407,8 +425,6 @@ Processed files carry `#key=value` metadata headers describing what was done, e.
 
 ```text
 Droplet.py                        # launcher (run this)
-VERSION
-updater.py
 Install_Droplet_Windows.bat       # installers
 Install_Droplet_macOS.command
 Install_Droplet_Linux.sh
@@ -419,6 +435,8 @@ Uninstall_Droplet_Linux.sh
 droplet_pkg/
 ├── app.py
 ├── constants.py
+├── updater.py                    # run with: python -m droplet_pkg.updater
+├── version_manager.py            # previous versions: python -m droplet_pkg.version_manager
 ├── io/
 ├── processing/
 ├── analysis/
@@ -426,16 +444,18 @@ droplet_pkg/
     └── windows/
 
 assets/
+├── about/                        # VERSION, LICENSE, RELEASE_NOTES.md
 ├── icons/                        # .ico / .icns / .png app icons
 ├── assimilation_guides/          # requirements*.txt, Droplet.desktop template,
 │                                 # Windows_install.ps1 / Windows_uninstall.ps1
+├── docs/images/                  # README screenshots
+├── example_spectra/              # example spectra + peak lists (opened on first launch)
 └── test/
-    └── test_suite.py
-
-docs/images/                      # README screenshots
+    ├── test_suite.py
+    └── generate_example_spectra.py  # regenerates example_spectra/
 ```
 
-`.venv/` is created by the installer and `droplet_backup_*/` by the updater; neither is part of the repository.
+`.venv/` is created by the installer, `droplet_backup_*/` by the updater and `previous_versions/` by Help → Previous Versions; none of them is part of the repository. Delete `previous_versions/` to remove every installed previous version at once.
 
 </details>
 
@@ -443,8 +463,8 @@ docs/images/                      # README screenshots
 
 ## Documentation
 
-- [RELEASE_NOTES.md](RELEASE_NOTES.md)
-- [LICENSE](LICENSE)
+- [RELEASE_NOTES.md](assets/about/RELEASE_NOTES.md)
+- [LICENSE](assets/about/LICENSE)
 
 ---
 
@@ -469,7 +489,7 @@ Built with:
 
 Released under the MIT License.
 
-See LICENSE for details.
+See [LICENSE](assets/about/LICENSE) for details.
 
 ---
 

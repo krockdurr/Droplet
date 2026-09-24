@@ -93,11 +93,14 @@ function Find-Python {
 }
 
 # Version string from a Droplet folder's VERSION file, or "unknown"
+# (assets\about\VERSION; older copies keep it at the folder root)
 function Get-DropletVersion($root) {
-    try {
-        $v = (Get-Content -LiteralPath (Join-Path $root "VERSION") -TotalCount 1 -ErrorAction Stop).Trim()
-        if ($v) { return $v }
-    } catch {}
+    foreach ($rel in @("assets\about\VERSION", "VERSION")) {
+        try {
+            $v = (Get-Content -LiteralPath (Join-Path $root $rel) -TotalCount 1 -ErrorAction Stop).Trim()
+            if ($v) { return $v }
+        } catch {}
+    }
     return "unknown"
 }
 

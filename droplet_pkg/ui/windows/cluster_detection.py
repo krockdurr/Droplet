@@ -16,7 +16,7 @@ from droplet_pkg.ui.mixins import StayOnTopMixin
 
 
 def _get_app():
-    import droplet.app as _m
+    import droplet_pkg.app as _m
     return _m
 
 

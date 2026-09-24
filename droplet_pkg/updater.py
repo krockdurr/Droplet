@@ -4,15 +4,19 @@ Droplet Updater
 ===============
 Run from the Droplet installation folder, with Droplet's own Python:
 
-    .venv/bin/python updater.py            # check, show the plan, ask, update
-    .venv/bin/python updater.py --check    # only report what would happen
-    .venv/bin/python updater.py --yes      # update without asking
-    .venv/bin/python updater.py --console  # terminal instead of a window
+    .venv/bin/python -m droplet_pkg.updater            # check, ask, update
+    .venv/bin/python -m droplet_pkg.updater --check    # only report
+    .venv/bin/python -m droplet_pkg.updater --yes      # update without asking
+    .venv/bin/python -m droplet_pkg.updater --console  # terminal, no window
+    .venv/bin/python -m droplet_pkg.updater --if-outdated  # silent unless outdated
+
+Run it with -m rather than as a file path: as a script, droplet_pkg/ would
+be first on sys.path and its subpackages (io/, …) would shadow the stdlib.
 
 What it does
 ------------
-1. Reads the local version from VERSION.
-2. Fetches VERSION from the update branch on GitHub (the repository's
+1. Reads the local version from assets/about/VERSION.
+2. Fetches that file from the update branch on GitHub (the repository's
    default branch unless UPDATE_BRANCH is set).
 3. Opens a window telling the user what it is about to do (nothing, or
    update X → Y) with Update / Cancel buttons.  Falls back to a terminal
@@ -24,19 +28,18 @@ What it does
                     is about to overwrite to droplet_backup_YYYYMMDD_HHMMSS/,
                     then copies the new files in.
 
-Using it from Droplet (later)
------------------------------
-The logic is split into two UI-independent steps so a GUI can reuse them:
+Use from Droplet
+----------------
+Droplet runs this module as a separate process (droplet_pkg/ui/update_checker.py),
+so the update never replaces code inside the running application:
+  • on startup                → -m droplet_pkg.updater --if-outdated
+  • Help → Check for Updates… → -m droplet_pkg.updater
+
+The logic itself is split into two UI-independent steps:
 
     plan = check_for_update()      # network only, changes nothing
     plan.needed / plan.describe()  # show this to the user
     apply_update(plan, log=...)    # does the update, raises UpdateError
-
-Both calls block, so run them outside the Qt main thread and forward
-`log` messages through a signal (run_gui() below does exactly this and
-its dialog can be lifted into Droplet).  Because apply_update() overwrites
-Droplet's own files, the safest pattern for the GUI is to ask the user,
-then launch `python updater.py --yes` as a separate process and quit.
 """
 
 import argparse
@@ -45,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -58,12 +62,16 @@ GITHUB_REPO   = "krockdurr/Droplet"
 # "HEAD" means the repository's default branch; set a branch name to pin one.
 UPDATE_BRANCH = "HEAD"
 TIMEOUT       = 30
-ROOT          = Path(__file__).parent.resolve()
-VERSION_FILE  = ROOT / "VERSION"
+ROOT          = Path(__file__).resolve().parent.parent  # installation folder
+VERSION_PATH  = "assets/about/VERSION"
+VERSION_FILE  = ROOT / VERSION_PATH
+# Where to look for VERSION on GitHub; older branches keep it at the
+# repository root.
+REMOTE_VERSION_PATHS = (VERSION_PATH, "VERSION")
 BACKUP_PREFIX = "droplet_backup_"
 
 # Top-level entries the ZIP update never touches.
-PROTECTED = {".git", ".venv"}
+PROTECTED = {".git", ".venv", "previous_versions"}
 # Top-level folders replaced wholesale, so files removed upstream disappear.
 # Every other folder is merged: new files are copied in, extra local files stay.
 REPLACED_DIRS = {"droplet_pkg"}
@@ -121,9 +129,14 @@ def resolve_branch() -> str:
 
 
 def fetch_remote_version(branch: str) -> str:
-    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/VERSION"
-    with _urlopen(url) as r:
-        return r.read().decode().strip()
+    for path in REMOTE_VERSION_PATHS:
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{branch}/{path}"
+        try:
+            with _urlopen(url) as r:
+                return r.read().decode().strip()
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404 or path == REMOTE_VERSION_PATHS[-1]:
+                raise
 
 
 def zip_url(branch: str) -> str:
@@ -318,8 +331,22 @@ AFTER_UPDATE = ("Run the installer for your system again so the dependencies "
 
 # ── Qt front-end ──────────────────────────────────────────────────────────────
 
-def run_gui(check_only: bool = False, auto_confirm: bool = False) -> int:
-    """Show the updater window.  Raises ImportError if no Qt binding exists."""
+def run_gui(check_only: bool = False, auto_confirm: bool = False,
+            if_outdated: bool = False) -> int:
+    """Show the updater window.  Raises ImportError if no Qt binding exists.
+
+    With `if_outdated`, the check runs first without any window, and the
+    window only appears if an update is available.
+    """
+    plan = None
+    if if_outdated:
+        try:
+            plan = check_for_update()
+        except UpdateError:
+            return 0  # offline etc. — stay silent
+        if not plan.needed:
+            return 0
+
     try:
         from PyQt6 import QtCore, QtGui, QtWidgets
     except ImportError:
@@ -345,7 +372,7 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False) -> int:
                 self.failed.emit(f"Unexpected error: {exc}")
 
     class UpdaterDialog(QtWidgets.QDialog):
-        def __init__(self):
+        def __init__(self, plan: UpdatePlan | None = None):
             super().__init__()
             self.setWindowTitle("Droplet Updater")
             icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
@@ -394,7 +421,10 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False) -> int:
             buttons.addWidget(self._close)
             lay.addLayout(buttons)
 
-            self._start_check()
+            if plan is None:
+                self._start_check()
+            else:
+                self._on_checked(plan)
 
         # ── state changes ──
 
@@ -488,7 +518,7 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False) -> int:
             super().reject()
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    dialog = UpdaterDialog()
+    dialog = UpdaterDialog(plan)
     dialog.exec()
     return dialog.exit_code
 
@@ -502,13 +532,19 @@ def _confirm(question: str) -> bool:
         return False
 
 
-def run_console(check_only: bool = False, auto_confirm: bool = False) -> int:
-    print("Checking for updates …")
+def run_console(check_only: bool = False, auto_confirm: bool = False,
+                if_outdated: bool = False) -> int:
+    if not if_outdated:
+        print("Checking for updates …")
     try:
         plan = check_for_update()
     except UpdateError as exc:
+        if if_outdated:
+            return 0
         print(exc)
         return 1
+    if if_outdated and not plan.needed:
+        return 0
 
     print()
     print(plan.describe())
@@ -540,14 +576,19 @@ def main(argv: list[str] | None = None) -> int:
                        help="update without asking for confirmation")
     parser.add_argument("--console", action="store_true",
                         help="use the terminal instead of a window")
+    parser.add_argument("--if-outdated", action="store_true",
+                        help="stay silent unless an update is available "
+                             "(used when Droplet starts)")
     args = parser.parse_args(argv)
+    options = dict(check_only=args.check, auto_confirm=args.yes,
+                   if_outdated=args.if_outdated)
 
     if not args.console:
         try:
-            return run_gui(check_only=args.check, auto_confirm=args.yes)
+            return run_gui(**options)
         except ImportError:
             print("Qt is not available, falling back to the terminal.\n")
-    return run_console(check_only=args.check, auto_confirm=args.yes)
+    return run_console(**options)
 
 
 if __name__ == "__main__":

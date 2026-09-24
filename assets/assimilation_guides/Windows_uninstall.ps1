@@ -3,7 +3,7 @@
 # - Then asks whether to also remove Droplet's settings and user data:
 #     registry key HKCU\Software\LILBID\PeakViewer   (Qt QSettings)
 #     %USERPROFILE%\.droplet                         (legend entries / labels)
-#     droplet_backup_* folders created by updater.py in the Droplet folder
+#     droplet_backup_* folders created by the updater in the Droplet folder
 # The .venv, Droplet.py and the rest of the repo are always left untouched.
 
 # This script lives in <repo_root>/assets/assimilation_guides/

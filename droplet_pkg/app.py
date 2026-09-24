@@ -64,9 +64,7 @@ from droplet_pkg.processing.signal import get_tolerance, find_peak_bounds as _fi
 
 
 
-# APP_VERSION = "3.0"
-
-with open('VERSION') as f: APP_VERSION = f.read()
+from droplet_pkg import APP_VERSION  # read from assets/about/VERSION
 
 
 # ─────────────────────────────────────────────
@@ -83,8 +81,19 @@ def _set_dialog_dir(key, path):
     d = os.path.dirname(path) if os.path.isfile(path) else path
     if d: settings.setValue(f"dialog_dir/{key}", d)
 
+# Bundled example spectra: opened when no data folder has been chosen yet
+# (first launch) or the last one no longer exists.
+EXAMPLE_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "assets", "example_spectra")
+
 last_base_dir = settings.value("base_dir", "")
-base_dir = last_base_dir if (last_base_dir and os.path.exists(last_base_dir)) else ""
+if last_base_dir and os.path.exists(last_base_dir):
+    base_dir = last_base_dir
+elif os.path.isdir(EXAMPLE_DATA_DIR):
+    base_dir = EXAMPLE_DATA_DIR
+else:
+    base_dir = ""
 
 VIRTUAL_FOLDER_PREFIX = "VIRTUAL FOLDER: "
 MAX_RECENT = 10
@@ -874,6 +883,8 @@ help_noise_action     = QtWidgets.QAction("Noise Clipping & Normalisation", main
 help_export_action    = QtWidgets.QAction("Export & Print",           main_win)
 help_shortcuts_action = QtWidgets.QAction("Keyboard Shortcuts",       main_win)
 about_action          = QtWidgets.QAction("About Droplet…",           main_win)
+check_updates_action  = QtWidgets.QAction("Check for Updates…",       main_win)
+previous_versions_action = QtWidgets.QAction("Previous Versions…",     main_win)
 help_menu.addAction(tutorial_action)
 help_menu.addSeparator()
 help_menu.addAction(help_files_action)
@@ -885,6 +896,9 @@ help_menu.addAction(help_export_action)
 help_menu.addSeparator()
 help_menu.addAction(about_action)
 help_menu.addAction(help_shortcuts_action)
+help_menu.addSeparator()
+help_menu.addAction(check_updates_action)
+help_menu.addAction(previous_versions_action)
 
 main_layout.setMenuBar(menu_bar)
 
@@ -17511,6 +17525,39 @@ help_shortcuts_action.triggered.connect(show_help_shortcuts)
 about_action.triggered.connect(show_about)
 
 
+def open_updater():
+    from droplet_pkg.ui.update_checker import open_updater as _open_updater
+    try:
+        if not _open_updater():
+            QtWidgets.QMessageBox.information(
+                main_win, "Droplet Updater", "The updater is already running.")
+    except Exception as exc:
+        QtWidgets.QMessageBox.warning(
+            main_win, "Droplet Updater", f"Could not start the updater:\n{exc}")
+
+check_updates_action.triggered.connect(open_updater)
+
+
+_previous_versions_window = None
+
+def open_previous_versions():
+    global _previous_versions_window
+    from droplet_pkg.ui.windows.previous_versions import PreviousVersionsWindow
+    if _previous_versions_window is None:
+        _previous_versions_window = PreviousVersionsWindow(main_win)
+    _previous_versions_window.show()
+    _previous_versions_window.raise_()
+    _previous_versions_window.activateWindow()
+
+previous_versions_action.triggered.connect(open_previous_versions)
+
+# A copy started from Help → Previous Versions must not update itself or
+# manage other versions: those belong to the current installation.
+if os.environ.get("DROPLET_PREVIOUS_VERSION"):
+    check_updates_action.setVisible(False)
+    previous_versions_action.setVisible(False)
+
+
 
 
 # ── wire plotting tool ──
@@ -17658,11 +17705,12 @@ def _startup_nudge():
 QtCore.QTimer.singleShot(250, _startup_nudge)
 # END startup nudge
 
-# ── Update check (background, non-blocking, 3 s delay so UI settles first) ──
+# ── Update check (separate process, 3 s delay so UI settles first) ──
+# The updater window only appears if a newer version is available.
 def _launch_update_check():
     try:
-        from droplet_pkg.ui.update_checker import start_update_check
-        start_update_check(APP_VERSION, main_win, settings)
+        from droplet_pkg.ui.update_checker import check_on_startup
+        check_on_startup(settings)
     except Exception:
         pass   # never let update-check crash the app
 

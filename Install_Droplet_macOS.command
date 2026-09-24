@@ -85,9 +85,11 @@ find_python() {
 }
 
 # Version string from a Droplet folder's VERSION file, or "unknown"
+# (assets/about/VERSION; older copies keep it at the folder root)
 droplet_version() {
     local v
-    v="$(head -n1 "$1/VERSION" 2>/dev/null | tr -d '[:space:]')"
+    v="$(head -n1 "$1/assets/about/VERSION" 2>/dev/null || head -n1 "$1/VERSION" 2>/dev/null)"
+    v="$(printf '%s' "$v" | tr -d '[:space:]')"
     echo "${v:-unknown}"
 }
 
