@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Droplet
+Path=__DROPLET_ROOT__
+Exec="__DROPLET_PYTHON__" "__DROPLET_ROOT__/Droplet.py"
+Icon=__DROPLET_ROOT__/assets/icons/Droplet_Icon.png
+Terminal=false
+Categories=Science;
+StartupNotify=true
+StartupWMClass=Droplet
