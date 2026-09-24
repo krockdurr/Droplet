@@ -1,0 +1,135 @@
+{
+ "format_version": 2,
+ "groups": [
+  {
+   "name": "reference",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "ratio 2:1",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "ratio 1:1",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "ratio 10:1",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "doublet 0.20 Da",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "doublet 0.40 Da",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "SNR ladder",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "broad",
+   "alpha": 255,
+   "collapsed": false
+  }
+ ],
+ "rows": [
+  {
+   "checked": true,
+   "color": "#ff3b30",
+   "label": "reference",
+   "mode": "manual",
+   "peaks": "17.0033",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "reference"
+  },
+  {
+   "checked": true,
+   "color": "#34c759",
+   "label": "ratio 2:1",
+   "mode": "manual",
+   "peaks": "71.035, 89.0455",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "ratio 2:1"
+  },
+  {
+   "checked": true,
+   "color": "#007aff",
+   "label": "ratio 1:1",
+   "mode": "manual",
+   "peaks": "107.056, 125.067",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "ratio 1:1"
+  },
+  {
+   "checked": true,
+   "color": "#ff9500",
+   "label": "ratio 10:1",
+   "mode": "manual",
+   "peaks": "143.077, 161.088",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "ratio 10:1"
+  },
+  {
+   "checked": true,
+   "color": "#af52de",
+   "label": "doublet 0.20 Da",
+   "mode": "manual",
+   "peaks": "179.1, 179.3",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "doublet 0.20 Da"
+  },
+  {
+   "checked": true,
+   "color": "#00c7be",
+   "label": "doublet 0.40 Da",
+   "mode": "manual",
+   "peaks": "215.1, 215.5",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "doublet 0.40 Da"
+  },
+  {
+   "checked": true,
+   "color": "#ff3b30",
+   "label": "SNR ladder",
+   "mode": "manual",
+   "peaks": "250, 260, 270, 280, 290",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "SNR ladder"
+  },
+  {
+   "checked": true,
+   "color": "#34c759",
+   "label": "broad",
+   "mode": "manual",
+   "peaks": "350",
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "broad"
+  }
+ ]
+}

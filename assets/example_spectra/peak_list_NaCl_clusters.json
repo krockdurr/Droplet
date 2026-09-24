@@ -1,0 +1,56 @@
+{
+ "format_version": 2,
+ "groups": [
+  {
+   "name": "NaCl clusters",
+   "alpha": 255,
+   "collapsed": false
+  },
+  {
+   "name": "Water clusters",
+   "alpha": 255,
+   "collapsed": false
+  }
+ ],
+ "rows": [
+  {
+   "checked": true,
+   "color": "#34c759",
+   "label": "Na+(NaCl)n",
+   "mode": "range",
+   "range_start": 22.9898,
+   "range_end": 457.6795,
+   "range_step": 57.958622,
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "NaCl clusters"
+  },
+  {
+   "checked": true,
+   "color": "#ff9500",
+   "label": "Na+(H2O)n",
+   "mode": "range",
+   "range_start": 41.0003,
+   "range_end": 230.1112,
+   "range_step": 18.010565,
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "Water clusters"
+  },
+  {
+   "checked": true,
+   "color": "#007aff",
+   "label": "H+(H2O)n",
+   "mode": "range",
+   "range_start": 19.0178,
+   "range_end": 100.0653,
+   "range_step": 18.010565,
+   "L_state": 0,
+   "1L_state": 0,
+   "envelope_btn": false,
+   "group": "Water clusters"
+  }
+ ]
+}
