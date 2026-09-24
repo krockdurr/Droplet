@@ -233,9 +233,12 @@ From inside the Droplet folder, run the updater with Droplet's own Python:
 
 The updater:
 
-- compares the local `VERSION` with the latest version on GitHub
-- backs up the current code to `droplet_backup_YYYYMMDD_HHMMSS/`
-- updates via `git pull` (cloned folder) or by downloading the ZIP from GitHub
+- compares the local `VERSION` with the one on the repository's default branch
+- opens a window showing what it is about to do (nothing, or update X → Y), with **Update** / **Cancel** buttons; nothing changes until you click Update
+- updates via `git pull --ff-only` (cloned folder) or by downloading the ZIP from GitHub
+- in ZIP mode, backs up every file it replaces to `droplet_backup_YYYYMMDD_HHMMSS/`
+
+Use `--check` to only report whether an update is available, `--yes` to skip the confirmation, or `--console` to use the terminal instead of a window.
 
 After an update, **run the installer again** so the dependencies and launcher match the new version, then restart Droplet.
 
