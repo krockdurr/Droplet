@@ -163,10 +163,13 @@ class PreviousVersionsWindow(QtWidgets.QDialog):
         if show_log:
             self._log.clear(); self._log.show()
         self._progress.show()
+        QtWidgets.QApplication.setOverrideCursor(
+            QtGui.QCursor(QtCore.Qt.CursorShape.BusyCursor))
         self._task.start()
         self._update_buttons()
 
     def _task_finished(self):
+        QtWidgets.QApplication.restoreOverrideCursor()
         self._installing = False
         self._progress.hide()
         self._update_buttons()

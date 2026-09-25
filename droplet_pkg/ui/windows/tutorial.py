@@ -155,10 +155,18 @@ class TutorialOverlay(QtWidgets.QWidget):
             "anchor":  "below",
         },
         {
+            "target":  lambda: _get_app().dropli_button,
+            "title":   "Meet Dropli",
+            "body":    "Not sure where something is? Click Dropli, pick what you're "
+                       "trying to do, and it tells you where to go, or opens the tool "
+                       "for you.",
+            "anchor":  "below",
+        },
+        {
             "target":  lambda: _get_app().menu_bar,
             "title":   "You're all set!",
             "body":    "That covers the main features.\n\n"
-                       "• Revisit any topic from  Help  in the menu bar.\n"
+                       "• Ask Dropli (top right) whenever you're stuck.\n"
                        "• Hover over any button or slider for a tooltip.\n"
                        "• Ctrl+Q to quit.",
             "anchor":  "below",

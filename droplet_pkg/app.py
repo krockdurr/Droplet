@@ -54,6 +54,7 @@ from scipy.sparse import csc_matrix, eye, diags
 from scipy.sparse.linalg import spsolve
 
 
+from droplet_pkg.ui.widgets import busy_cursor, attach_busy_cursor
 from droplet_pkg.ui.windows.residuals_viewer import ResidualsViewerWindow
 from droplet_pkg.ui.windows.cluster_detection import ClusterDetectionWindow
 from droplet_pkg.ui.windows.peak_comparison import PeakComparisonWindow
@@ -973,25 +974,14 @@ tests_menu.setToolTipsVisible(True)
 
 # ── Help ──────────────────────────────────────
 help_menu = menu_bar.addMenu("Help")
+ask_dropli_action     = QtWidgets.QAction("Ask Dropli…",              main_win)
 tutorial_action       = QtWidgets.QAction("Tutorial (first steps)…", main_win)
-help_files_action     = QtWidgets.QAction("Files & Overlays",         main_win)
-help_view_action      = QtWidgets.QAction("View & Navigation",        main_win)
-help_peaks_action     = QtWidgets.QAction("Peak Lists",               main_win)
-help_analysis_action  = QtWidgets.QAction("Processing & Analysis",    main_win)
-help_noise_action     = QtWidgets.QAction("Noise Clipping & Normalisation", main_win)
-help_export_action    = QtWidgets.QAction("Export & Print",           main_win)
 help_shortcuts_action = QtWidgets.QAction("Keyboard Shortcuts",       main_win)
 about_action          = QtWidgets.QAction("About Droplet…",           main_win)
 check_updates_action  = QtWidgets.QAction("Check for Updates…",       main_win)
 previous_versions_action = QtWidgets.QAction("Previous Versions…",     main_win)
+help_menu.addAction(ask_dropli_action)
 help_menu.addAction(tutorial_action)
-help_menu.addSeparator()
-help_menu.addAction(help_files_action)
-help_menu.addAction(help_view_action)
-help_menu.addAction(help_peaks_action)
-help_menu.addAction(help_analysis_action)
-help_menu.addAction(help_noise_action)
-help_menu.addAction(help_export_action)
 help_menu.addSeparator()
 help_menu.addAction(about_action)
 help_menu.addAction(help_shortcuts_action)
@@ -2548,6 +2538,9 @@ def _make_progress_dialog(title, message, cancellable=True):
     mw_geo  = main_win.geometry(); dlg_geo = dlg.sizeHint()
     dlg.move(mw_geo.right() - dlg_geo.width() - 12,
              mw_geo.bottom() - dlg_geo.height() - 12)
+    # Busy pointer until the dialog closes; spinner-only when nothing is clickable
+    attach_busy_cursor(dlg, QtCore.Qt.CursorShape.BusyCursor if cancellable
+                       else QtCore.Qt.CursorShape.WaitCursor)
     dlg.show(); app.processEvents()
     return dlg
 
@@ -2759,6 +2752,7 @@ _batch_manual_state = {
     "output_folder": "",
     "done_count":   0,
     "total":        0,
+    "residuals_files": [],    # *_residuals_spectrum.txt saved during this batch
 }
 
 def _save_batch_manual_state():
@@ -3065,36 +3059,37 @@ class ManualRecalWindow(QtWidgets.QWidget, StayOnTopMixin):
         detected_scatter_x = []
         detected_scatter_y = []
         
-        for row_data, nominal in active_mz_list:
-            result = _detect_peak_near(df, nominal, window=1.5)
-            if result is None: continue
+        with busy_cursor():
+            for row_data, nominal in active_mz_list:
+                result = _detect_peak_near(df, nominal, window=1.5)
+                if result is None: continue
             
-            det_mz, det_int = result
+                det_mz, det_int = result
             
-            # NEW: Calculate local SNR
-            left = max(0, df.index[df['mz'] >= det_mz - LOCAL_WINDOW].min())
-            right = min(len(df)-1, df.index[df['mz'] <= det_mz + LOCAL_WINDOW].max())
+                # NEW: Calculate local SNR
+                left = max(0, df.index[df['mz'] >= det_mz - LOCAL_WINDOW].min())
+                right = min(len(df)-1, df.index[df['mz'] <= det_mz + LOCAL_WINDOW].max())
             
-            if left is None or right is None or left >= right:
-                # No local window - accept anyway
-                self._detected.append((row_data, nominal, det_mz, det_int))
-                detected_scatter_x.append(det_mz)
-                detected_scatter_y.append(det_int)
-                continue
+                if left is None or right is None or left >= right:
+                    # No local window - accept anyway
+                    self._detected.append((row_data, nominal, det_mz, det_int))
+                    detected_scatter_x.append(det_mz)
+                    detected_scatter_y.append(det_int)
+                    continue
                 
-            local_region = df.iloc[left:right+1]
-            noise_level = local_region['intensity'].quantile(0.25)  # Q1 as noise estimate
+                local_region = df.iloc[left:right+1]
+                noise_level = local_region['intensity'].quantile(0.25)  # Q1 as noise estimate
             
-            if noise_level == 0: noise_level = 1e-6  # Avoid div by zero
-            snr = det_int / noise_level
+                if noise_level == 0: noise_level = 1e-6  # Avoid div by zero
+                snr = det_int / noise_level
             
-            # NEW: Auto-filter noise peaks
-            if snr >= SNR_THRESHOLD:
-                self._detected.append((row_data, nominal, det_mz, det_int))
-                detected_scatter_x.append(det_mz)
-                detected_scatter_y.append(det_int)
-            else:
-                print(f"Filtered noise peak: {det_mz:.2f} (SNR={snr:.1f})")
+                # NEW: Auto-filter noise peaks
+                if snr >= SNR_THRESHOLD:
+                    self._detected.append((row_data, nominal, det_mz, det_int))
+                    detected_scatter_x.append(det_mz)
+                    detected_scatter_y.append(det_int)
+                else:
+                    print(f"Filtered noise peak: {det_mz:.2f} (SNR={snr:.1f})")
     
         if not detected_scatter_x:
             QtWidgets.QMessageBox.warning(self, "No real peaks found",
@@ -3330,178 +3325,6 @@ def _draw_manual_recal_scatter(mz_arr, int_arr):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  RESIDUAL PREVIEW DIALOG
-# ═════════════════════════════════════════════════════════════════════════════
-
-_RPD_COLORS = ['#4e9de0', '#e8944b', '#5cba6e', '#c46ee8',
-               '#e8c84b', '#4be8d8', '#e84b7e', '#a0a0a0']
-
-
-class ResidualPreviewDialog(QtWidgets.QDialog):
-    """
-    Non-modal live preview of per-anchor Δm/z residuals after manual recalibration.
-
-    Shown before the recalibrated file is saved so the user can inspect the
-    calibration quality and either confirm (proceed to save / next sample)
-    or cancel (return to PeakReviewWindow to adjust peak assignments).
-    """
-
-    # Emitted with the row-index (into summary_df / pairs) of a clicked anchor
-    anchor_clicked = QtCore.pyqtSignal(int)
-
-    def __init__(self, summary_df, stem="", color_map=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Residuals Preview — {stem}" if stem else "Residuals Preview")
-        self.resize(640, 420)
-        self.setMinimumSize(480, 300)
-        # Use Window (not Dialog) so it has its own place in the window stack,
-        # is not forced above other application windows, and gets maximize/minimize.
-        self.setWindowFlags(
-            QtCore.Qt.WindowType.Window
-            | QtCore.Qt.WindowType.WindowMaximizeButtonHint
-            | QtCore.Qt.WindowType.WindowMinimizeButtonHint
-            | QtCore.Qt.WindowType.WindowCloseButtonHint
-        )
-        self.setModal(False)
-
-        self._pg_widget = pg.GraphicsLayoutWidget()
-        self._bar_plot  = self._pg_widget.addPlot(title="Calibration anchors — Δm/z per peak")
-        self._bar_plot.setLabel('bottom', 'Original m/z')
-        self._bar_plot.setLabel('left',   'Δ m/z')
-        self._bar_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._bar_plot.getAxis('left').enableAutoSIPrefix(False)
-
-        # Hover/click handlers — connected once, use self._anchor_pts set by _redraw
-        self._hover_lbl  = pg.TextItem("", anchor=(1, 0), color='w')
-        self._anchor_pts: list = []   # (x, y, pl_name, row_idx)
-        self._rpd_proxy  = pg.SignalProxy(
-            self._bar_plot.scene().sigMouseMoved,
-            rateLimit=30, slot=self._on_mouse_move)
-        self._bar_plot.scene().sigMouseClicked.connect(self._on_scene_clicked)
-
-        self._info_lbl = QtWidgets.QLabel("")
-        self._info_lbl.setStyleSheet("font-size: 9pt; color: gray;")
-        self._info_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-
-        confirm_btn = QtWidgets.QPushButton("✔  Confirm & Save")
-        confirm_btn.setFixedHeight(32)
-        confirm_btn.setStyleSheet(
-            "QPushButton { background: #1e5f28; color: white; "
-            "border-radius: 4px; font-weight: bold; padding: 0 14px; }"
-            "QPushButton:hover { background: #27802e; }")
-        cancel_btn = QtWidgets.QPushButton("Cancel")
-        cancel_btn.setFixedHeight(32)
-        confirm_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(confirm_btn)
-        btn_row.addWidget(cancel_btn)
-
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.addWidget(self._pg_widget, stretch=1)
-        lay.addWidget(self._info_lbl)
-        lay.addLayout(btn_row)
-
-        self._redraw(summary_df, color_map)
-
-    # ── Color resolution ──────────────────────────────────────────────────────
-
-    @staticmethod
-    def _resolve_colors(summary_df, color_map):
-        pl_col = (summary_df["peak_list"].fillna("").astype(str).str.strip()
-                  if "peak_list" in summary_df.columns
-                  else pd.Series([""] * len(summary_df)))
-        unique_pls = list(dict.fromkeys(pl_col))
-        result = dict(color_map) if color_map else {}
-        auto_idx = 0
-        for n in unique_pls:
-            if n not in result:
-                result[n] = _RPD_COLORS[auto_idx % len(_RPD_COLORS)]
-                auto_idx += 1
-        return pl_col, result
-
-    # ── Chart drawing ─────────────────────────────────────────────────────────
-
-    def _redraw(self, summary_df, color_map=None):
-        orig  = summary_df["original m/z"].to_numpy(dtype=float)
-        delta = summary_df["Δ m/z"].to_numpy(dtype=float)
-        pl_col, resolved = self._resolve_colors(summary_df, color_map)
-
-        self._bar_plot.clear()
-        self._bar_plot.addLine(y=0, pen=pg.mkPen('r', width=1,
-                               style=QtCore.Qt.PenStyle.DashLine))
-
-        # Re-parent hover label after clear()
-        self._hover_lbl.setText("")
-        self._hover_lbl.setParentItem(self._bar_plot.getViewBox())
-        self._anchor_pts = []
-
-        for row_idx, (x, d, pl) in enumerate(zip(orig, delta, pl_col)):
-            color = resolved.get(pl, '#a0a0a0')
-            self._bar_plot.addItem(pg.PlotDataItem([x, x], [0, d],
-                                                  pen=pg.mkPen(color, width=4)))
-            self._bar_plot.addItem(pg.ScatterPlotItem(
-                x=[x], y=[d], size=10,
-                pen=pg.mkPen('w', width=0.5),
-                brush=pg.mkBrush(color)))
-            self._anchor_pts.append((x, d, pl, row_idx))
-            lbl = pg.TextItem(f"Δ{d:+.3f}", anchor=(0.5, 1.0), color='w')
-            lbl.setPos(x, d)
-            self._bar_plot.addItem(lbl)
-
-        n_pts = len(orig)
-        rms   = float(np.sqrt(np.mean(delta ** 2))) if n_pts else 0.0
-        max_d = float(np.max(np.abs(delta))) if n_pts else 0.0
-        self._info_lbl.setText(
-            f"{n_pts} anchor(s)  |  RMS Δ = {rms:.4f}  |  max |Δ| = {max_d:.4f}")
-
-    def update_data(self, summary_df, color_map=None):
-        """Refresh the chart live without closing the dialog."""
-        self._redraw(summary_df, color_map)
-
-    # ── Hover label ───────────────────────────────────────────────────────────
-
-    def _nearest_anchor(self, scene_pos):
-        """Return (row_idx, pl_name) of the nearest anchor within threshold, or (-1, '')."""
-        vb = self._bar_plot.getViewBox()
-        if not vb.sceneBoundingRect().contains(scene_pos):
-            return -1, ""
-        mp  = vb.mapSceneToView(scene_pos)
-        vr  = vb.viewRange()
-        x_span = abs(vr[0][1] - vr[0][0]) or 1.0
-        y_span = abs(vr[1][1] - vr[1][0]) or 1.0
-        best_idx, best_name, best_dist = -1, "", float("inf")
-        for ax, ay, apl, ridx in self._anchor_pts:
-            dx = (mp.x() - ax) / x_span
-            dy = (mp.y() - ay) / y_span
-            dist = (dx*dx + dy*dy) ** 0.5
-            if dist < 0.05 and dist < best_dist:
-                best_dist = dist
-                best_idx  = ridx
-                best_name = apl
-        return best_idx, best_name
-
-    def _on_mouse_move(self, evt):
-        pos = evt[0]
-        vb  = self._bar_plot.getViewBox()
-        _, name = self._nearest_anchor(pos)
-        self._hover_lbl.setText(name)
-        if name:
-            vr = vb.viewRange()
-            self._hover_lbl.setPos(vr[0][1], vr[1][1])
-
-    def _on_scene_clicked(self, event):
-        if event.button() != QtCore.Qt.MouseButton.LeftButton:
-            return
-        row_idx, _ = self._nearest_anchor(event.scenePos())
-        if row_idx >= 0:
-            self.anchor_clicked.emit(row_idx)
-            event.accept()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 #  PEAK REVIEW WINDOW
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -3528,7 +3351,7 @@ class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
         self._peak_highlight_curve = None
         self._highlighted_row_idx  = None
         self._zoom_markers         = []   # InfiniteLine/PlotDataItem items for zoom annotation
-        self._preview_dlg        = None   # live ResidualPreviewDialog (non-modal)
+        self._preview_dlg        = None   # live ResidualsViewerWindow (preview mode)
         self._pending_save_data  = None   # dict of latest computed recal results
         self._cascade_mode       = settings.value("prw_cascade_mode", False, type=bool)
 
@@ -4027,7 +3850,8 @@ class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
             QtWidgets.QMessageBox.warning(
                 self, "No spectrum", "No raw spectrum loaded."); return
 
-        result = self._compute_recal()
+        with busy_cursor():
+            result = self._compute_recal()
         if result is None:
             QtWidgets.QMessageBox.warning(
                 self, "No valid pairs",
@@ -4050,9 +3874,11 @@ class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
             self._preview_dlg.raise_()
             self._preview_dlg.activateWindow()
         else:
-            self._preview_dlg = ResidualPreviewDialog(
-                summary_df, stem=stem_preview,
-                color_map=color_map, parent=None)
+            self._preview_dlg = ResidualsViewerWindow(
+                preview_df=summary_df, preview_stem=stem_preview,
+                preview_colors=color_map, parent=None,
+                batch_files=(list(_batch_manual_state.get("residuals_files", []))
+                             if self.batch_mode else None))
             self._preview_dlg.accepted.connect(self._do_save)
             self._preview_dlg.finished.connect(self._on_preview_closed)
             self._preview_dlg.anchor_clicked.connect(self._on_anchor_clicked)
@@ -4065,7 +3891,8 @@ class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
             return
         if df_raw is None:
             return
-        result = self._compute_recal()
+        with busy_cursor():
+            result = self._compute_recal()
         if result is None:
             return
         pairs, color_map, corrected_df, fitparams, summary_df = result
@@ -4160,6 +3987,15 @@ class PeakReviewWindow(QtWidgets.QWidget, StayOnTopMixin):
             _save_residuals(_res_save_folder,
                             os.path.basename(out_path), summary_df,
                             ts=_session_ts, color_map=color_map)
+            if self.batch_mode:
+                _res_spec = os.path.join(
+                    _res_save_folder, f"Residuals {_session_ts}",
+                    os.path.splitext(os.path.basename(out_path))[0]
+                    + "_residuals_spectrum.txt")
+                _res_list = _batch_manual_state.setdefault("residuals_files", [])
+                if _res_spec in _res_list:
+                    _res_list.remove(_res_spec)
+                _res_list.append(_res_spec)
         except Exception as e_res:
             QtWidgets.QMessageBox.warning(
                 self, "Residuals",
@@ -4582,6 +4418,7 @@ def show_batch_manual_recalibrate():
     _batch_manual_state["output_folder"] = out_folder
     _batch_manual_state["done_count"]    = 0
     _batch_manual_state["total"]         = len(input_files)
+    _batch_manual_state["residuals_files"] = []
     _save_batch_manual_state()
 
     _load_file_for_batch(input_files[0])
@@ -5936,6 +5773,7 @@ class TofToMassWindow(QtWidgets.QWidget, StayOnTopMixin):
         dlg.setWindowTitle("ToF → Mass Batch")
         dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
         dlg.setMinimumWidth(340)
+        attach_busy_cursor(dlg)
         dlg.show()
         errors  = []
         log_rows = []   # (out_filename, a_used, b_used)  — one per successful file
@@ -5979,6 +5817,8 @@ class TofToMassWindow(QtWidgets.QWidget, StayOnTopMixin):
         #         for out_name, a_used, b_used in log_rows:
         #             fh.write(f"{out_name}\t{a_used:.10g}\t{b_used:.10g}\n")
 
+        dlg.setValue(n)
+        dlg.close()
         if errors:
             QtWidgets.QMessageBox.warning(
                 self, "Batch Errors",
@@ -5987,8 +5827,6 @@ class TofToMassWindow(QtWidgets.QWidget, StayOnTopMixin):
             QtWidgets.QMessageBox.information(
                 self, "Done",
                 f"Done.  {n} file(s) saved to:\n{out_folder}\n\nLog: {log_name}")
-        dlg.setValue(n)
-        dlg.close()
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -6022,7 +5860,7 @@ def _batch_run(process_fn, files, save_folder, suffix, title, parallel=False, n_
     dlg = QtWidgets.QProgressDialog(f"Processing 0 / {n}…", "Cancel", 0, n, main_win)
     dlg.setWindowTitle(title)
     dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-    dlg.setMinimumWidth(340); dlg.show()
+    dlg.setMinimumWidth(340); attach_busy_cursor(dlg); dlg.show()
     errors = []
 
     if not parallel or n_workers <= 1:
@@ -6215,7 +6053,7 @@ def _batch_run_recal(files, save_folder, suffix, title, do_baseline=False,
     dlg = QtWidgets.QProgressDialog(f"Processing 0 / {n}…", "Cancel", 0, n, main_win)
     dlg.setWindowTitle(title)
     dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-    dlg.setMinimumWidth(340); dlg.show()
+    dlg.setMinimumWidth(340); attach_busy_cursor(dlg); dlg.show()
 
     errors        = []
     needs_review  = []   # list of filenames flagged by check_manually
@@ -8865,7 +8703,8 @@ _render_timer.timeout.connect(_finish_splash_after_first_plot)
 # ─────────────────────────────────────────────
 def safe_read(path, sep=None):
     try:
-        return read_spectrum_file(path, sep=sep)
+        with busy_cursor():
+            return read_spectrum_file(path, sep=sep)
     except Exception as e:
         QtWidgets.QMessageBox.warning(main_win, "File Parse Error",
             f"Could not load:\n{path}\n\n{e}")
@@ -14570,6 +14409,7 @@ def batch_export_plots():
     progress.setWindowTitle("Batch Export")
     progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
     progress.setMinimumDuration(0)
+    attach_busy_cursor(progress)
     progress.setValue(0)
     QtWidgets.QApplication.processEvents()
 
@@ -14904,220 +14744,6 @@ def _help_dialog(title, text):
     layout.addWidget(btns)
     dlg.exec()
 
-def show_help_files():
-    _help_dialog("Files & Overlays",
-        "<b>Opening files</b><br>"
-        "• <i>File → Open Folder</i> - loads all spectrum files (.txt .csv .dat .asc .tsv) from a directory.<br>"
-        "• <i>File → Open Individual Files</i> - pick specific files regardless of folder.<br>"
-        "• Drag-and-drop files directly onto the main window.<br>"
-        "• Recent folders and files are listed under <i>File → Recent Folders / Recent Files</i>.<br><br>"
-        "<b>Polarity filter</b><br>"
-        "The <i>neg / pos / All</i> dropdown filters the file list by polarity tag in the filename. "
-        "'All' shows all files regardless of polarity. "
-        "When no files match, the selector shows \"No file in X mode\". "
-        "The software auto-switches to 'pos' if only positive-mode files are found.<br><br>"
-        "<b>dt filter</b><br>"
-        "The <i>dt:</i> dropdown filters files by the dt value encoded in the filename "
-        "(e.g. <i>_dt071</i>). Only dt values present in files matching the current polarity "
-        "are shown. Select 'All' to disable filtering.<br><br>"
-        "<b>Colour picker</b><br>"
-        "The small colour square next to 'Main file' sets the colour of the main spectrum. "
-        "Each overlay also has its own colour square.<br><br>"
-        "<b>Separator</b><br>"
-        "The <i>Sep</i> dropdown selects the column separator. Auto-detect works for most files.<br><br>"
-        "<b>Overlays</b><br>"
-        "• Click <i>+ Add Overlay</i> to add a spectrum on top of the main one.<br>"
-        "• Each overlay has its own polarity filter, dt filter, and file selector.<br>"
-        "• The checkbox enables/disables the overlay.<br>"
-        "• <i>Ctrl+Scroll</i> or <i>Ctrl+↑↓</i> cycles through overlays one at a time.<br>"
-        "• The <i>Overlay Opacity</i> slider controls transparency of all overlays.<br>"
-        "• Processed spectra (baseline / recalibrated) appear as overlays with a 💾 Save button.<br>"
-        "• The Files & Overlays section can be collapsed by clicking the ▾ header.")
-
-def show_help_view():
-    _help_dialog("View & Navigation",
-        "• <i>Pan / Navigate</i> (default) - click and drag to pan; scroll to zoom.<br>"
-        "• <i>Zoom Box [Z]</i> - draw a rectangle to zoom into a region. Press Z to toggle.<br>"
-        "• Right-click on the plot for additional axis and view options.<br><br>"
-        "<b>View options</b><br>"
-        "• <i>Cross-lines</i> - crosshair cursor tracking your mouse, shows m/z and intensity.<br>"
-        "• <i>Dynamic Scale</i> - normalises all spectra to the same peak height for easy comparison. "
-        "Uses sigma clipping internally to suppress baseline noise during normalisation.<br>"
-        "• <i>Lock Axes</i> - freezes the current zoom range when switching files.<br>"
-        "• <i>Subtract Overlay</i> - displays the difference between main and first overlay spectrum.<br>"
-        "• <i>Dynamic Subtraction</i> - normalises both before subtracting.<br>"
-        "• <i>Show m/z at Cursor</i> - displays the current m/z value in a floating label "
-        "next to the mouse cursor while hovering over the plot.<br><br>"
-        "<b>Stacked Spectra Mode</b><br>"
-        "Toggle in <i>View</i> menu or the <i>Stacked</i> checkbox in the toolbar. "
-        "Each active spectrum is shown in its own row with a shared X axis, normalised to 0–1 "
-        "so spectra are directly comparable in height. X axes are linked: panning or zooming "
-        "one row affects all. Each spectrum is drawn in its own chosen colour.<br>"
-        "<i>Log Y</i> (checkbox beside Stacked) switches all rows to a logarithmic Y scale. "
-        "When σ Clip is also enabled, the noise floor from the slider is applied before log scaling. "
-        "Without σ Clip, only a minimal floor (1e-6) is added to keep log display safe.<br>"
-        "The Stacked state and Log Y state are remembered between sessions.<br><br>"
-        "<b>Go to last zoom</b><br>"
-        "Right-click the plot and choose <i>Go to last zoom</i> to step back through your zoom history.<br><br>"
-        "<b>Display theme</b><br>"
-        "Switch between Dark and Bright background in the Display menu.<br><br>"
-        "<b>Sliders</b><br>"
-        "• <i>Highlight intensity</i> - controls the colour saturation of highlighted peaks. "
-        "Lower values blend toward white (bright) or black (dark).<br>"
-        "• <i>Overlay opacity</i> - transparency of all overlay spectra (5–100 %). "
-        "Also controllable via Ctrl+Scroll or Ctrl+↑↓.")
-
-def show_help_peaks():
-    _help_dialog("Peak Lists",
-        "<b>Opening the peak list</b><br>"
-        "Use <i>Peaks → Open Peaks List</i> or Ctrl+P.<br><br>"
-        "<b>Each row defines a set of m/z values to highlight:</b><br>"
-        "• ⠿ - drag handle to reorder rows up/down<br>"
-        "• ☐ - enable/disable the row<br>"
-        "• ■ - colour picker<br>"
-        "• ≡ - toggle between <i>manual entry</i> (comma-separated m/z values) "
-        "and <i>range mode</i> (start → end, step)<br>"
-        "• Label field - text shown when hovering over a highlighted peak<br>"
-        "• ⌒ - isotopic envelope toggle: when active, connects the tops of the peaks in this row "
-        "with a dashed line. Useful for checking whether a cluster of peaks forms a single "
-        "smooth distribution (isotopic envelope) or has multiple contributions.<br>"
-        "• × - remove the row<br><br>"
-        "<b>Label display options</b><br>"
-        "• <i>Show Labels</i> - draws the row label above each highlighted peak.<br>"
-        "• <i>Show highlighted masses</i> - draws the m/z value above every manually highlighted peak.<br>"
-        "• <i>Show masses above threshold</i> - labels every peak that exceeds the threshold with its "
-        "m/z value. Works independently of <i>Auto-detect peaks</i> - you do not need to run "
-        "auto-detection first.<br>"
-        "• <i>Auto-detect peaks</i> - marks peaks above the threshold with red triangles.<br><br>"
-        "<b>Threshold controls</b><br>"
-        "The threshold value and mode affect both <i>Show masses above threshold</i> and "
-        "<i>Auto-detect peaks</i>.<br>"
-        "• <i>% of max intensity</i> mode - the spinbox value is a percentage of the spectrum's "
-        "highest peak. For example, 5 % means only peaks at least 5 % as tall as the tallest peak "
-        "are shown or detected.<br>"
-        "• <i>SNR</i> mode - the spinbox value is a minimum signal-to-noise ratio. Noise is estimated "
-        "locally as the 25th percentile of intensity in a ±5 Da window around each candidate peak. "
-        "A value of 3 means a peak must be at least 3× the local noise floor to be included.<br><br>"
-        "<b>Picking peaks by clicking</b><br>"
-        "Enable <i>Pick Peaks Mode</i> (Peaks menu or P key).<br>"
-        "• Single-click → adds the nearest m/z to the selected row.<br>"
-        "• Double-click → removes the nearest m/z from the selected row.<br><br>"
-        "<b>Undo / Redo</b><br>"
-        "Ctrl+Z to undo, Ctrl+Y or Ctrl+Shift+Z to redo text edits in the peak list.<br><br>"
-        "<b>Import / Export</b><br>"
-        "Peak lists are saved as JSON files and include range definitions.")
-
-def show_help_analysis():
-    _help_dialog("Processing & Analysis",
-        "<b>Baseline Correction</b>  (Processing menu)<br>"
-        "Removes the background signal from the spectrum.<br>"
-        "• <i>airPLS</i> - adaptive iterative reweighted least squares (LILBID standard).<br>"
-        "• <i>SNIP</i> - statistics-sensitive non-linear iterative peak-clipping (atomic MS classic).<br>"
-        "The corrected spectrum appears as an overlay with a 💾 Save button. "
-        "You can choose to apply to the main spectrum or any active overlay.<br><br>"
-        "<b>Auto-Recalibration</b>  (Processing menu)<br>"
-        "Detects peaks automatically using a continuous wavelet transform, matches them to known "
-        "LILBID calibrant ions, and fits a quadratic TOF polynomial. A review dialog shows the "
-        "calibration pairs and flags uncertain results for manual inspection before applying. "
-        "Residuals (original m/z vs corrected) are saved as CSV files in a "
-        "<i>Residuals dd.mm.yyyy - hh.mm.ss/</i> subfolder inside the output folder.<br><br>"
-        "<b>Manual Recalibration</b>  (Processing menu)<br>"
-        "Choose which peak-list rows to use as calibration anchors. The app locates the local "
-        "intensity maximum near each nominal m/z, then opens a review window where you can "
-        "adjust or exclude individual peaks. Clicking <i>Apply</i> fits the same quadratic TOF "
-        "polynomial and saves the result. A batch mode lets you step through a whole folder "
-        "file by file, with a ← Previous button to revisit already-processed files.<br><br>"
-        "<b>Normalize Spectrum</b>  (Processing menu)<br>"
-        "Divides all intensities so that either the highest peak = 1 (standard), or a specific "
-        "m/z value = 1 (enter the m/z in the text box). The result appears as an overlay "
-        "with a 💾 Save button. A batch version processes an entire folder.<br>"
-        "No hard noise floor is imposed - use the <i>σ Clip</i> toggle for noise suppression.<br><br>"
-        "<b>Baseline + Recalibration</b>  (Processing menu)<br>"
-        "Applies baseline correction first, then auto-recalibration, in a single step.<br><br>"
-        "<b>Batch processing</b>  (Processing menu)<br>"
-        "All operations have batch versions that process an entire folder. "
-        "Batch recalibration jobs report which files were flagged for manual review. "
-        "Batch jobs offer a parallelisation option - select how many CPU cores to use.<br><br>"
-        "<b>Cluster Detection</b>  (Analysis menu)<br>"
-        "Finds repeating peak series separated by a fixed m/z spacing. "
-        "Leave the spacing field empty to let the algorithm discover candidate spacings automatically, "
-        "or enter one or more values (comma-separated) to search for specific clusters. "
-        "Results are shown grouped by chain; detected clusters can be added directly to the peak lists.<br><br>"
-        "<b>Compare Common / Unique Peaks</b>  (Analysis menu)<br>"
-        "Detects peaks in all visible spectra and classifies them as common (present in all) "
-        "or unique (present in only one). Common peaks are marked with green vertical lines, "
-        "unique peaks with dashed per-spectrum coloured lines. Three opacity sliders control "
-        "the visibility of background spectra, common lines, and unique lines independently.<br><br>"
-        "<b>Measure Peak Area</b>  (Analysis menu)<br>"
-        "Opens a window with three tools:<br>"
-        "• <i>Interactive range</i> - click twice on the plot to define a range; area is computed "
-        "immediately using the trapezoidal rule.<br>"
-        "• <i>Total spectrum area</i> - integrates the entire spectrum for any loaded spectrum.<br>"
-        "• <i>Peak-list ratios</i> - computes the area under each toggled peak list and shows "
-        "relative ratios. Toggle peak lists in the window independently of the Peaks window.")
-
-def show_help_noise():
-    _help_dialog("Noise Clipping & Normalisation",
-        "<b>Sigma noise clipping  (σ Clip)</b><br>"
-        "The <i>σ Clip</i> checkbox in the toolbar suppresses baseline noise on the main plot "
-        "without modifying the underlying data.<br><br>"
-        "The slider next to it sets the threshold from <b>1.0 σ</b> (aggressive - clips more) "
-        "to <b>4.0 σ</b> (conservative - keeps more of the baseline). "
-        "The current value is shown as a live label (e.g. <i>2.0σ</i>).<br><br>"
-        "<b>How it works</b><br>"
-        "The algorithm estimates the noise level from the bottom 50 % of positive intensity values "
-        "(the baseline region, not real peaks). It computes the median and standard deviation of "
-        "that region, then sets the floor at:<br>"
-        "&nbsp;&nbsp;&nbsp;<i>floor = noise_median + N × noise_std</i><br>"
-        "Any data point below this floor is raised to the floor value. Real peaks are never clipped.<br><br>"
-        "<b>Per-spectrum floors</b><br>"
-        "Each spectrum gets its own floor computed from its own noise. "
-        "A noisier spectrum will have a higher floor than a clean one - "
-        "this is physically correct, not an error. "
-        "Forcing a shared floor would hide real differences in data quality.<br><br>"
-        "<b>σ Clip vs Dynamic Scale</b><br>"
-        "• <i>Dynamic Scale</i> - normalises all spectra to the same peak height (0–1) and "
-        "applies sigma clipping internally. Use this to visually compare spectra of different intensities.<br>"
-        "• <i>σ Clip alone</i> - suppresses baseline noise but keeps your original intensity scale. "
-        "Use this when you want noise suppression without rescaling.<br>"
-        "Both can be active at the same time.<br><br>"
-        "<b>Stacked mode + Log Y</b><br>"
-        "When <i>Stacked</i> and <i>Log Y</i> are active together:<br>"
-        "• If <i>σ Clip</i> is on, the slider-controlled floor is applied before log scaling "
-        "and the Y range is derived from it automatically.<br>"
-        "• If <i>σ Clip</i> is off, only a minimal safety floor (1 × 10⁻⁶) is added to "
-        "prevent log(0) - no noise is clipped.<br><br>"
-        "<b>Normalisation</b><br>"
-        "Processing → <i>Normalize Spectrum</i> scales intensities so the tallest peak = 1, "
-        "or so a chosen m/z = 1. No hard noise floor is applied to the output - "
-        "the σ Clip toggle handles display-level noise suppression independently.")
-
-def show_help_export():
-    _help_dialog("Export & Print",
-        "<b>Residuals files</b><br>"
-        "Every recalibration (auto, manual, batch) writes a <i>Residuals dd.mm.yyyy - hh.mm.ss/</i> "
-        "subfolder in the output folder containing:<br>"
-        "• <i>*_residuals.csv</i> - table of original m/z, corrected m/z, and Δ m/z.<br>"
-        "• <i>*_residuals.txt</i> - two-column file (m/z  Δ m/z) openable as a spectrum in Droplet.<br><br>"
-        "<b>Plot menu</b><br>"
-        "All plot exports show the plot exactly as it is in the window "
-        "(size, zoom, labels, legend; the minimap is left out), like "
-        "<i>Copy Plot to Clipboard</i>. "
-        "Resize the window to change the image size.<br>"
-        "• <i>Export as PNG</i> - the same image as Copy Plot to Clipboard.<br>"
-        "• <i>Export as SVG</i> - the same view as a scalable vector image.<br>"
-        "• <i>Export as PDF</i> - the same view as a vector PDF, page shaped like the plot.<br>"
-        "• <i>Export as PGF</i> - the same view for LaTeX: <tt>\\usepackage{pgf}</tt> and "
-        "<tt>\\input{plot.pgf}</tt>; text is typeset in the document font.<br>"
-        "• <i>Batch Export Plots</i> - loads every file visible under the mode / dt filters "
-        "and exports each as PNG, PDF, SVG or PGF with the current zoom (Y range fitted to the "
-        "largest spectrum).<br>"
-        "• <i>Copy Plot to Clipboard</i> (Ctrl+Shift+C) - copies a screenshot of the plot.<br>"
-        "• <i>Export Peak Data as CSV</i> - table of all highlighted peak positions and intensities.<br>"
-        "• <i>Print</i> (Ctrl+Shift+P) - sends to printer in landscape orientation.<br><br>"
-        "File extensions (.png .svg .pdf .csv .json) are added automatically "
-        "if not typed in the save dialog.")
-
 def show_help_shortcuts():
     _help_dialog("Keyboard Shortcuts",
         "<b>Navigation</b><br>"
@@ -15177,12 +14803,6 @@ def show_first_time_tutorial():
 
 # ── Wire help menu ────────────────────────────
 tutorial_action.triggered.connect(show_tutorial)
-help_files_action.triggered.connect(show_help_files)
-help_view_action.triggered.connect(show_help_view)
-help_peaks_action.triggered.connect(show_help_peaks)
-help_analysis_action.triggered.connect(show_help_analysis)
-help_noise_action.triggered.connect(show_help_noise)
-help_export_action.triggered.connect(show_help_export)
 help_shortcuts_action.triggered.connect(show_help_shortcuts)
 about_action.triggered.connect(show_about)
 
@@ -15238,6 +14858,79 @@ def run_test_suite():
             main_win, "Test Suite", f"Could not start the test suite:\n{exc}")
 
 run_tests_action.triggered.connect(run_test_suite)
+
+
+# ─────────────────────────────────────────────
+#  Dropli — the clickable guide (top-right corner)
+# ─────────────────────────────────────────────
+def _turn_on(action):
+    """Check a checkable action the same way a menu click would."""
+    if not action.isChecked():
+        action.trigger()
+
+def _dropli_baseline_current():
+    if baseline_action.isChecked():
+        apply_baseline_to_current()
+    else:
+        baseline_action.setChecked(True)
+
+# Action keys used in droplet_pkg/ui/dropli_script.py
+_dropli_actions = {
+    "open_folder":        open_folder_action.trigger,
+    "open_files":         open_files_action.trigger,
+    "open_project":       open_project_action.trigger,
+    "save_project":       save_project_action.trigger,
+    "add_overlay":        add_overlay_btn.click,
+    "stacked_on":         lambda: _turn_on(stacked_mode_action),
+    "dynscale_on":        lambda: _turn_on(dyn_scale_action),
+    "subtract_on":        lambda: _turn_on(subtract_action),
+    "sigma_on":           lambda: _turn_on(sigma3_clip_action),
+    "lock_axes_on":       lambda: _turn_on(lock_axes_action),
+    "mz_cursor_on":       lambda: _turn_on(mz_cursor_action),
+    "pick_on":            lambda: _turn_on(pick_mode_action),
+    "zoom_box":           lambda: _turn_on(zoom_mode_action),
+    "area_mode_on":       lambda: _turn_on(area_mode_action),
+    "peak_comparison":    peak_comparison_action.trigger,
+    "baseline_current":   _dropli_baseline_current,
+    "baseline_batch":     baseline_batch_action.trigger,
+    "auto_recal":         auto_recal_action.trigger,
+    "auto_recal_batch":   recal_batch_action.trigger,
+    "manual_recal":       recal_action.trigger,
+    "manual_recal_batch": manual_recal_batch_action.trigger,
+    "both_current":       both_current_action.trigger,
+    "both_batch":         both_batch_action.trigger,
+    "view_residuals":     view_residuals_action.trigger,
+    "normalize_current":  normalize_current_action.trigger,
+    "normalize_batch":    normalize_batch_action.trigger,
+    "tof_to_mass":        tof_to_mass_action.trigger,
+    "peaks_window":       peaks_action.trigger,
+    "cluster_detection":  cluster_detect_action.trigger,
+    "ratio_mode":         ratio_mode_action.trigger,
+    "area_tools":         area_action.trigger,
+    "export_png":         export_png_action.trigger,
+    "export_svg":         export_svg_action.trigger,
+    "export_pdf":         export_pdf_action.trigger,
+    "export_pgf":         export_pgf_action.trigger,
+    "copy_plot":          copy_plot_action.trigger,
+    "batch_export":       batch_export_plots_action.trigger,
+    "export_peaks_csv":   export_peaks_csv_action.trigger,
+    "print":              print_action.trigger,
+    "dark":               dark_action.trigger,
+    "bright":             bright_action.trigger,
+    "shortcuts":          show_help_shortcuts,
+    "tutorial":           show_tutorial,
+    "run_tests":          run_tests_action.trigger,
+    "check_updates":      check_updates_action.trigger,
+    "previous_versions":  previous_versions_action.trigger,
+    "about":              show_about,
+}
+if os.environ.get("DROPLET_PREVIOUS_VERSION"):   # see below: not offered in old copies
+    _dropli_actions.pop("check_updates", None)
+    _dropli_actions.pop("previous_versions", None)
+
+from droplet_pkg.ui.windows.dropli import install_dropli
+dropli_button, dropli_chat = install_dropli(main_win, _dropli_actions)
+ask_dropli_action.triggered.connect(lambda: dropli_chat.open())
 
 # A copy started from Help → Previous Versions must not update itself or
 # manage other versions: those belong to the current installation.

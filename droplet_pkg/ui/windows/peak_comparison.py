@@ -11,6 +11,7 @@ except ImportError:
 from droplet_pkg.analysis.peaks import get_auto_peaks
 from droplet_pkg.io.spectrum_reader import spectrum_display_name
 from droplet_pkg.ui.mixins import StayOnTopMixin
+from droplet_pkg.ui.widgets import busy_cursor
 
 
 def _get_app():
@@ -206,7 +207,8 @@ class PeakComparisonWindow(QtWidgets.QWidget, StayOnTopMixin):
             return
 
         tol = self._tol_spin.value()
-        all_peaks = [self._detect_peaks_in(s[0]) for s in spectra]
+        with busy_cursor():
+            all_peaks = [self._detect_peaks_in(s[0]) for s in spectra]
         total_detected = sum(len(p) for p in all_peaks)
 
         if total_detected == 0:

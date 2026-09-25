@@ -2,7 +2,7 @@
 
 > Interactive desktop viewer and analysis toolkit for LILBID mass spectrometry data.
 
-![Version](https://img.shields.io/badge/version-3.0-blue) ![Python](https://img.shields.io/badge/python-3.11+-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+![Version](https://img.shields.io/badge/version-3.3-blue) ![Python](https://img.shields.io/badge/python-3.11+-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
 ---
 
@@ -26,7 +26,7 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 - Linear and log-Y plotting
 - Stacked multi-spectrum view, with **Dynamic Scaling** (per-spectrum 0–1 normalisation) or shared raw-intensity Y axis
 - Configurable peak-list legend
-- Publication-quality figure export
+- Publication-quality figure export (PNG, PDF, SVG, and PGF with native LaTeX text for `\input{}`)
 
 ### Analysis
 
@@ -39,7 +39,7 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 - Peak comparison across spectra
 - Peak area integration with an interactive **peak boundary checker**
 - Two-click **peak intensity ratio** tool (`R`)
-- Recalibration residuals viewer
+- Recalibration residuals viewer (also used as the live preview during manual recalibration, listing the residuals already saved in the current batch)
 
 ### Processing
 
@@ -55,6 +55,8 @@ Droplet provides a complete desktop workflow for LILBID mass spectrometry analys
 - Overlay management
 - Batch processing and batch PNG export (respects mode / dt filters)
 - Session/project save files (`.drp`)
+- **Dropli**, a clickable in-app guide (top-right corner, or Help → Ask Dropli…): pick what you're trying to do and it tells you where to go, or opens the tool for you
+- Start-up screen with progress messages, and the system busy pointer during long operations
 - Background update checking
 - Built-in updater utility
 - Install and launch previous versions side by side (Help → Previous Versions…)
@@ -249,11 +251,11 @@ After an update, **run the installer again** so the dependencies and launcher ma
 
 Version 3.0 changes the folder layout (`Droplet_v2.7.2.py` → `Droplet.py`, `droplet/` → `droplet_pkg/`, requirements moved to `assets/assimilation_guides/`). The simplest upgrade path is:
 
-1. Download or clone v3.0 into a **new** folder.
+1. Download or clone v3.3 into a **new** folder.
 2. Run the installer for your system from that folder.
 3. Delete the old v2.x folder once you are happy with the new one.
 
-Your settings, saved legend labels and peak-list files are kept: they live outside the Droplet folder, and peak-list `.json` files from v2.x load into v3.0 (their rows are placed in an *Unclassified* group).
+Your settings, saved legend labels and peak-list files are kept: they live outside the Droplet folder, and peak-list `.json` files from v2.x load into v3.x (their rows are placed in an *Unclassified* group).
 
 ### Previous versions
 
@@ -313,20 +315,27 @@ Close Droplet before uninstalling. If you pinned Droplet to the macOS Dock or Wi
 
 ---
 
-## Latest Update (v3.0)
+## Latest Update (v3.0 – v3.3)
 
-Highlights:
+Highlights, compared with v2.7.2:
 
 - **One-click installers and uninstallers** for Windows, macOS and Linux, each with its own isolated `.venv`
-- New layout: `Droplet.py` launcher, `droplet_pkg/` package, pinned requirements in `assets/assimilation_guides/`
+- New layout: `Droplet.py` launcher, `droplet_pkg/` package, pinned requirements in `assets/assimilation_guides/`, version / license / release notes in `assets/about/`
+- **Updater** runs automatically at launch and opens only when an update is available; **previous versions** can be installed and launched side by side (Help → Previous Versions…)
+- **Dropli**, a clickable guide in the top-right corner (also Help → Ask Dropli…). It is not an AI: it walks through a fixed set of questions, then says where to go and can open the right tool directly. It replaces the old Help topic dialogs
 - **Peak-list groups** with drag-and-drop, per-group opacity and L / 1L / envelope toggles; groups saved in peak-list files
 - Peaks window: search (`Ctrl+F`), multi-row selection, copy / paste / duplicate / aggregate, insert above / below, *Show edited only*, peak list overlap check
+- **Legend** built from the peak lists: per-list symbol and column saved in the peak-list file, draggable, hover to mark peaks, double-click to zoom, automatic symbols
 - **Peak boundary checker**: inspect and drag-edit integration bounds before exporting peak areas (single file and batch)
 - **Peak ratio tool** (`R`): click two peak apices to get their intensity ratio
-- **Residuals preview** before saving a manual recalibration, with live updates and click-to-jump to peak rows
+- **Residuals preview** before saving a manual recalibration, with live updates, click-to-jump to peak rows and, in batch mode, the residuals already saved in the batch
 - Recalibration, baseline and ToF → mass parameters recorded in output file headers
 - Stacked mode: **Dyn Scale** toggle, fast in-place updates without rebuilding, *Return to last zoom*
+- **PGF export** (Plot → Export as PGF…) for LaTeX documents, with no LaTeX installation needed
+- Start-up screen with progress messages, and the busy pointer during long operations
+- Synthetic **example spectra** opened on first launch, and a test suite (Tests → Run Test Suite…)
 - NumPy 2 compatibility, more robust peak-boundary detection, and a shutdown crash fix
+- Removed: the standalone Plotting Tool and the matplotlib dependency
 
 See [RELEASE_NOTES.md](assets/about/RELEASE_NOTES.md) for full details.
 
@@ -444,7 +453,8 @@ droplet_pkg/                        # the application
 ├── version_manager.py              # previous versions: python -m droplet_pkg.version_manager
 ├── io/
 │   ├── spectrum_reader.py          # read / write spectrum files, separators, # headers
-│   └── file_utils.py               # folder scanning, polarity / dt filters, virtual folders
+│   ├── file_utils.py               # folder scanning, polarity / dt filters, virtual folders
+│   └── pgf_writer.py               # PGF (LaTeX) export of the plot
 ├── processing/
 │   ├── baseline.py                 # airPLS, SNIP, Whittaker smoother
 │   ├── calibration.py              # auto-recalibration (calibrant tables) and manual recal pairs
@@ -457,13 +467,16 @@ droplet_pkg/                        # the application
     ├── widgets.py                  # reusable widgets (collapsible section, peak rows, …)
     ├── mixins.py                   # "Pin on top" for popup windows
     ├── update_checker.py           # starts the updater (startup check, Help menu)
+    ├── splash.py                   # start-up screen (runs in its own process)
+    ├── dropli_script.py            # Dropli's conversation tree (questions → answers)
     └── windows/
         ├── cluster_detection.py    # Analysis → Cluster Detection
         ├── peak_area.py            # peak areas, ratios and the peak boundary checker
         ├── peak_comparison.py      # common / unique peaks across spectra
         ├── peak_confirmation.py    # peak-list confirmation side panel
-        ├── residuals_viewer.py     # recalibration residuals (Δm/z) browser
+        ├── residuals_viewer.py     # recalibration residuals (Δm/z) browser and live preview
         ├── tutorial.py             # first-launch tutorial overlay
+        ├── dropli.py               # Dropli, the clickable guide (top-right) and its chat
         ├── previous_versions.py    # Help → Previous Versions
         ├── manual_recal.py         # shims for ManualRecalWindow and
         └── peak_review.py          #   PeakReviewWindow; the classes live in app.py
@@ -471,6 +484,7 @@ droplet_pkg/                        # the application
 assets/
 ├── about/                          # VERSION, LICENSE, RELEASE_NOTES.md
 ├── icons/                          # Droplet_Icon .ico / .icns / .png
+├── frames/                         # Dropli sprite frames (mouth closed / half / open)
 ├── assimilation_guides/            # requirements.txt, requirements_new.txt,
 │                                   # Droplet.desktop template,
 │                                   # Windows_install.ps1, Windows_uninstall.ps1

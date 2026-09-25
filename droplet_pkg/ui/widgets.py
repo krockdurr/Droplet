@@ -11,6 +11,50 @@ try:
 except ImportError:
     from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
 
+from contextlib import contextmanager
+
+
+# ── Busy cursor ───────────────────────────────────────────────────────────────
+# Uses the OS's own wait / busy pointer.  WaitCursor (spinner only) is for work
+# that blocks the UI; BusyCursor (arrow + spinner) is for work that runs while
+# the UI stays usable, e.g. behind a progress dialog with a Cancel button.
+
+@contextmanager
+def busy_cursor(kind=QtCore.Qt.CursorShape.WaitCursor):
+    """Show the OS busy pointer for the duration of the ``with`` block."""
+    QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(kind))
+    QtWidgets.QApplication.processEvents()   # let the cursor change show first
+    try:
+        yield
+    finally:
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+
+class _CursorReleaser(QtCore.QObject):
+    """Restores the override cursor once, when the watched widget hides or dies."""
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        self._released = False
+        widget.installEventFilter(self)
+        widget.destroyed.connect(self.release)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Hide:
+            self.release()
+        return False
+
+    def release(self, *_):
+        if not self._released:
+            self._released = True
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+
+def attach_busy_cursor(widget, kind=QtCore.Qt.CursorShape.BusyCursor):
+    """Show the OS busy pointer until ``widget`` (e.g. a progress dialog) is hidden."""
+    QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(kind))
+    return _CursorReleaser(widget)
+
 
 class CollapsibleSection(QtWidgets.QWidget):
     """A titled section that can be expanded or collapsed by clicking its header."""
