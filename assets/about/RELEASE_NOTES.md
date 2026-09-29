@@ -2,9 +2,9 @@
 
 ---
 
-# v3.0
+# v3.0 – v3.3
 
-> Major release: one-click installers and uninstallers for all platforms, a new project layout, peak-list groups, a peak boundary checker, a peak ratio tool, a residuals preview for manual recalibration, processing metadata in output files, and faster stacked mode.
+> Major release. Versions 3.0 to 3.3 are described together, as changes compared with v2.7.2: one-click installers and uninstallers for all platforms, a new project layout, an updater that runs at launch, side-by-side previous versions, Dropli (a clickable in-app guide), peak-list groups, a reworked legend, a peak boundary checker, a peak ratio tool, a residuals preview for manual recalibration, PGF export for LaTeX, processing metadata in output files, faster stacked mode, example spectra and a built-in test suite.
 
 ## Installation and packaging
 
@@ -39,19 +39,48 @@ The Droplet folder and its `.venv` are always left untouched.
 
 ### New project layout
 
-| v2.7.x                         | v3.0                                                  |
+| v2.7.x                         | v3.3                                                  |
 | ------------------------------ | ----------------------------------------------------- |
 | `Droplet_v2.7.2.py`            | `Droplet.py` (version-independent launcher name)      |
 | `droplet/`                     | `droplet_pkg/`                                        |
+| `updater.py`                   | `droplet_pkg/updater.py` (`python -m droplet_pkg.updater`) |
+| `VERSION`, `LICENSE`, `RELEASE_NOTES.md` | `assets/about/`                             |
 | `requirements.txt` (`>=` ranges) | `assets/assimilation_guides/requirements.txt` and `requirements_new.txt` (exact pins) |
 | `test_suite.py`                | `assets/test/test_suite.py`                           |
+| `docs/images/`                 | `assets/docs/images/`                                 |
 | —                              | `assets/icons/` (`.ico`, `.icns`, `.png`)             |
+| —                              | `assets/example_spectra/`, `assets/frames/` (Dropli)  |
 
-The application version is now read from the `VERSION` file only. `updater.py` backs up `droplet_pkg/`.
+The application version is read from `assets/about/VERSION` only, so Droplet no longer has to be started from inside its folder. matplotlib is no longer a dependency.
 
-**Upgrading from v2.x:** install v3.0 into a new folder with the installer, then delete the old folder. Settings, saved legend labels and peak-list files are kept.
+**Upgrading from v2.x:** install v3.3 into a new folder with the installer, then delete the old folder. Settings, saved legend labels and peak-list files are kept.
+
+### Updater
+
+- Droplet checks GitHub in the background at every launch and opens the updater window only when a newer version is available. It can also be opened from **Help → Check for Updates…**.
+- The window shows what it is about to do (nothing, or update X → Y); nothing changes until you click **Update**.
+- Updates via `git pull --ff-only` in a cloned folder, or by downloading the ZIP (every replaced file is backed up to `droplet_backup_YYYYMMDD_HHMMSS/`).
+- Command-line options: `--check`, `--yes`, `--console`.
+
+### Previous versions
+
+**Help → Previous Versions…** lists older releases on GitHub and can **Install**, **Launch** or **Remove** each one. A previous version is downloaded into `previous_versions/<version>/` with its own Python environment holding library versions tested with it (every 2.x release needs NumPy < 2.4). The current version and its launcher are never changed. The same is available from a terminal: `python -m droplet_pkg.version_manager list | install | launch | remove <version>`.
+
+### Start-up and feedback
+
+- A start-up screen shows Droplet's icon, a progress bar and plain-language messages while libraries load and peak lists are restored. It runs in its own process, so it stays smooth while Droplet is busy.
+- The system busy pointer is shown during long operations (peak detection, recalibration, batch processing, file loading…), and while progress dialogs are open.
 
 ## New features
+
+### Dropli, the clickable guide
+
+Dropli sits in the top-right corner of the main window (also **Help → Ask Dropli…**). Click it, pick what you're trying to do, and it tells you where to go in the menus, with buttons that open the right tool for you. Dropli is not an AI: it follows a fixed tree of questions and answers. It replaces the Help topic dialogs of v2.7.x, and the first-launch tutorial introduces it.
+
+### Example spectra and test suite
+
+- On first launch Droplet opens `assets/example_spectra/`: five synthetic LILBID spectra with known answers (negative- and positive-mode water calibrants, a NaCl cluster spectrum, a peak area / ratio standard and a later-delay-time water spectrum), with matching peak lists and a README.
+- **Tests → Run Test Suite…** checks that Droplet works correctly on this computer. The report can be saved and sent along with a problem report. It also runs from a terminal: `python assets/test/test_suite.py [--console]`.
 
 ### Peak-list groups
 
@@ -98,7 +127,7 @@ The ratio-mode option is now labelled *Between peak lists (normalized to largest
 
 ### Residuals preview for manual recalibration
 
-Manual recalibration now opens a non-modal **Residuals Preview** window before saving:
+Manual recalibration now opens the Residuals Viewer as a non-modal **Residuals Preview** before saving:
 
 - Per-anchor Δm/z plot, coloured per peak list, with hover read-out.
 - Updates live as peaks are toggled in the review window; clicking an anchor scrolls to and highlights its peak row.
@@ -106,6 +135,7 @@ Manual recalibration now opens a non-modal **Residuals Preview** window before s
 - **⇹ Lines**: vertical reference / detected lines with an arrow, shown only when |Δ| ≥ an adjustable threshold.
 - Peaks with the same nominal m/z are kept in sync across groups.
 - **Confirm & Save** proceeds; **Cancel** returns to peak review.
+- In batch mode the file list also shows the residuals already saved in the current batch (most recent first), so earlier files can be compared with the current one.
 
 ### Residuals viewer
 
@@ -114,6 +144,18 @@ Manual recalibration now opens a non-modal **Residuals Preview** window before s
 - New custom legend: hovering an entry dims the other peak lists.
 - Hover label on the anchor bar chart.
 - The window can be maximised and snapped to screen edges.
+
+### Peak-list legend
+
+The on-screen legend is now built directly from the peak lists:
+
+- Each peak list carries its own legend settings (shown or not, symbol, column), saved in the peak-list file. Renaming a label or changing a colour in the legend dialog changes the peak list itself, so there is no separate copy to keep in sync.
+- Hovering a legend entry marks that peak list's peaks in the view with dashed lines; double-clicking it zooms to them.
+- The legend can be dragged anywhere on the plot and keeps its corner when the window is resized. The legend dialog has a *Reset position* button.
+- **⚡ Fill missing symbols** gives a free symbol to every peak list without one (new peak lists get one automatically); **Reassign all symbols…** replaces them all in legend order.
+- Adjustable symbol size, and an option to keep unticked peak lists in the on-screen legend, greyed out (never in exports).
+- Imported saved labels without a matching peak list are kept as *legend-only* labels.
+- Ticks, symbols and columns are restored at the next start if the peak-list file has not changed.
 
 ### Processing metadata in output files
 
@@ -135,7 +177,8 @@ Processed spectra now record how they were produced as `#key=value` headers, pla
 
 ### Display and plot
 
-- **Plot → Show spectrum names legend** toggle (persisted).
+- **Plot → Export as PGF…**: the plot as a PGF picture for LaTeX (`\usepackage{pgf}`, `\input{plot.pgf}`), with native LaTeX text and vector lines. No LaTeX installation is needed.
+- A button on the plot title bar hides it; **View → Show Plot Title Bar** brings it back.
 - **Plot → Cursor info font** and **View → m/z cursor font size** controls.
 - The crosshair on/off state is persisted (off by default).
 - The dt filter is persisted across sessions.
@@ -158,6 +201,11 @@ Processed spectra now record how they were produced as `#key=value` headers, pla
 - Colour changes no longer trigger a full stacked layout rebuild.
 - The dt filter is restored after all other initialisation, so it is no longer overwritten at startup.
 - Removed unused helpers `_sigma3_floor` and `_normalise_and_clip` (superseded by the unified noise floor from v2.7.2).
+
+## Removed
+
+- The standalone **Plotting Tool** (`Ctrl+Shift+T`); its features are in the main window.
+- The Help topic dialogs (Files & Overlays, View & Navigation, …), replaced by Dropli.
 
 ---
 
