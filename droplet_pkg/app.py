@@ -1070,6 +1070,37 @@ class CollapsibleSection(QtWidgets.QWidget):
     def add_widget(self, widget):
         self._content_layout.addWidget(widget)
 
+class _ScrollFadeShadow(QtWidgets.QWidget):
+    """Gradient strip at the bottom of a QScrollArea, shown while more content is below."""
+    def __init__(self, area, height=14):
+        super().__init__(area.viewport())
+        self._area = area
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFixedHeight(height)
+        sb = area.verticalScrollBar()
+        sb.valueChanged.connect(self.refresh)
+        sb.rangeChanged.connect(self.refresh)
+        area.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Resize:
+            self.refresh()
+        return False
+
+    def refresh(self, *_):
+        vp = self._area.viewport()
+        self.setGeometry(0, vp.height() - self.height(), vp.width(), self.height())
+        sb = self._area.verticalScrollBar()
+        self.setVisible(sb.value() < sb.maximum())
+        self.raise_()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        g = QtGui.QLinearGradient(0, 0, 0, self.height())
+        g.setColorAt(0, QtGui.QColor(0, 0, 0, 0))
+        g.setColorAt(1, QtGui.QColor(0, 0, 0, 70))
+        p.fillRect(self.rect(), g)
+
 # ─────────────────────────────────────────────
 #  SECTION 1: Files & Overlays
 # ─────────────────────────────────────────────
@@ -1177,9 +1208,48 @@ dt_combo.currentTextChanged.connect(lambda v: settings.setValue("dt_filter", v))
 def get_sep_from_combo():
     return {"Tab": "\t", "Comma": ",", "Semicolon": ";", "Space": " "}.get(fmt_combo.currentText(), None)
 
-overlay_rows_layout = QtWidgets.QVBoxLayout()
-files_section.add_layout(overlay_rows_layout)
+overlay_rows_container = QtWidgets.QWidget()
+overlay_rows_layout = QtWidgets.QVBoxLayout(overlay_rows_container)
+overlay_rows_layout.setContentsMargins(0, 0, 0, 0)
+overlay_rows_layout.setSpacing(2)
+
+overlay_rows_scroll = QtWidgets.QScrollArea()
+overlay_rows_scroll.setWidgetResizable(True)
+overlay_rows_scroll.setWidget(overlay_rows_container)
+overlay_rows_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+overlay_rows_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+overlay_rows_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+overlay_rows_scroll.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                                  QtWidgets.QSizePolicy.Policy.Fixed)
+files_section.add_widget(overlay_rows_scroll)
+_overlay_fade = _ScrollFadeShadow(overlay_rows_scroll)
+
+OVERLAY_LIST_MAX_WINDOW_FRAC = 0.15
+
+def _update_overlay_scroll_height():
+    if not overlay_list:
+        overlay_rows_scroll.setVisible(False)
+        return
+    m = overlay_rows_layout.contentsMargins()
+    rows_h = sum(ov["widget"].sizeHint().height() for ov in overlay_list)
+    gaps_h = overlay_rows_layout.spacing() * (len(overlay_list) - 1)
+    content_h = rows_h + gaps_h + m.top() + m.bottom()
+    cap = int(main_win.height() * OVERLAY_LIST_MAX_WINDOW_FRAC)
+    overlay_rows_scroll.setFixedHeight(min(content_h, cap))
+    overlay_rows_scroll.setVisible(True)
+
+class _MainResizeWatcher(QtCore.QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Resize:
+            _update_overlay_scroll_height()
+        return False
+
+_main_resize_watcher = _MainResizeWatcher()
+main_win.installEventFilter(_main_resize_watcher)
+
 overlay_list = []
+_update_overlay_scroll_height()
+
 OVERLAY_COLORS = [
     '#e6194b',  # vivid red
     '#3cb44b',  # vivid green
@@ -1195,6 +1265,8 @@ OVERLAY_COLORS = [
 
 def make_overlay_row(index=0, label=None, path=None, show_save=False):
     row_widget = QtWidgets.QWidget()
+    row_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                             QtWidgets.QSizePolicy.Policy.Fixed)
     row_layout = QtWidgets.QHBoxLayout()
     row_layout.setContentsMargins(0, 0, 0, 0)
     row_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
@@ -1313,7 +1385,7 @@ def make_overlay_row(index=0, label=None, path=None, show_save=False):
 
     def on_remove():
         overlay_list.remove(ov_data)
-        overlay_rows_layout.removeWidget(row_widget); row_widget.deleteLater()
+        overlay_rows_layout.removeWidget(row_widget); row_widget.deleteLater(); _update_overlay_scroll_height()
         _invalidate_overlay_curves()
         render_plot()
 
@@ -1340,6 +1412,8 @@ def add_overlay_row(label=None, path=None, show_save=False, df_override=None):
     ov_data, row_widget = make_overlay_row(idx, label=label, path=path, show_save=show_save)
     overlay_list.append(ov_data)
     overlay_rows_layout.addWidget(row_widget)
+    _update_overlay_scroll_height()
+    QtCore.QTimer.singleShot(0, lambda w=row_widget: overlay_rows_scroll.ensureWidgetVisible(w))
     if df_override is not None:
         ov_data["df"] = df_override
         ov_data["is_processed"] = True
@@ -4302,7 +4376,7 @@ def _advance_batch_manual(recal_win):
             overlay_list.remove(ov)
             try:
                 overlay_rows_layout.removeWidget(ov["widget"])
-                ov["widget"].deleteLater()
+                ov["widget"].deleteLater(); _update_overlay_scroll_height()
             except Exception:
                 pass
     _invalidate_overlay_curves()
@@ -4466,7 +4540,7 @@ def _remove_overlay_if_exists(ov_data_ref):
         overlay_list.remove(ov_data_ref)
         try:
             overlay_rows_layout.removeWidget(ov_data_ref["widget"])
-            ov_data_ref["widget"].deleteLater()
+            ov_data_ref["widget"].deleteLater(); _update_overlay_scroll_height()
         except Exception:
             pass
     _invalidate_overlay_curves()
