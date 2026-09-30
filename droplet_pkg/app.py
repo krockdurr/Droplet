@@ -975,7 +975,7 @@ tests_menu.setToolTipsVisible(True)
 # ── Help ──────────────────────────────────────
 help_menu = menu_bar.addMenu("Help")
 ask_dropli_action     = QtWidgets.QAction("Ask Dropli…",              main_win)
-tutorial_action       = QtWidgets.QAction("Tutorial (first steps)…", main_win)
+tutorial_action       = QtWidgets.QAction("Quick Tour…",              main_win)
 help_shortcuts_action = QtWidgets.QAction("Keyboard Shortcuts",       main_win)
 about_action          = QtWidgets.QAction("About Droplet…",           main_win)
 check_updates_action  = QtWidgets.QAction("Check for Updates…",       main_win)
@@ -14852,27 +14852,28 @@ def show_about():
         "by M. Umair (MIT licence).<br><br>"
         "<b>Built with</b>  Python · PyQt6 · pyqtgraph · NumPy · SciPy · pandas")
 
+_tutorial_overlay = None
+
 def show_tutorial():
-    overlay = TutorialOverlay(main_win)
-    overlay.setGeometry(main_win.rect())
-    overlay.show()
-    overlay.raise_()
+    """Dropli's quick tour (Help → Quick Tour…, or from Dropli's chat)."""
+    global _tutorial_overlay
+    if _tutorial_overlay is not None and not _tutorial_overlay._closed:
+        return                                   # already running
+    try:
+        dropli_chat.hide()
+        dropli_chat.restart_silently()           # next click on Dropli starts fresh
+    except NameError:
+        pass
+    _tutorial_overlay = TutorialOverlay(main_win)
+    _tutorial_overlay.start()
 
-    def _resize_overlay():
-        overlay.setGeometry(main_win.rect())
-        # Use a timer so the resize fully settles before we update;
-        # avoids re-entering resizeEvent during _refresh_parent_pixmap
-        QtCore.QTimer.singleShot(0, overlay._update_step)
 
-    main_win.resizeEvent = lambda e: (_resize_overlay(), QtWidgets.QWidget.resizeEvent(main_win, e))
-
-
-def show_first_time_tutorial():
-    already_seen = settings.value("tutorial_seen", False)
-    if not already_seen:
-        # Slight delay so the main window is fully painted first
-        QtCore.QTimer.singleShot(300, show_tutorial)
-        settings.setValue("tutorial_seen", True)
+def show_first_time_welcome():
+    """First launch: Dropli says hello and offers the quick tour."""
+    if settings.value("welcome_seen", False, type=bool):
+        return
+    settings.setValue("welcome_seen", True)
+    dropli_chat.open("welcome")
 
 
 # ── Wire help menu ────────────────────────────
@@ -15026,7 +15027,6 @@ if _init_display == "dark":
 set_display_mode(_init_display)
 splash_step(86, "Restoring your last session…")
 restore_session_state()
-show_first_time_tutorial()
 
 # ── "Go to last zoom" context menu entry ──────────────────────────────
 def _go_to_last_zoom():
@@ -15158,6 +15158,12 @@ if splash_active():                     # focus once the start-up screen closes
     when_splash_finished(lambda: QtCore.QTimer.singleShot(50, _focus_main_window))
 else:
     QtCore.QTimer.singleShot(400, _focus_main_window)
+
+# ── First launch: Dropli welcomes the user (after the window has settled) ──
+if splash_active():
+    when_splash_finished(lambda: QtCore.QTimer.singleShot(700, show_first_time_welcome))
+else:
+    QtCore.QTimer.singleShot(1000, show_first_time_welcome)
 
 # ── Update check (separate process, 3 s delay so UI settles first) ──
 # The updater window only appears if a newer version is available.

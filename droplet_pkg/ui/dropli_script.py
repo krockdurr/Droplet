@@ -38,6 +38,24 @@ NODES = {
             ("Something else",                 "other"),
         ],
     },
+    # First launch (opened by app.py once, see show_first_time_welcome)
+    "welcome": {
+        "say": ["Hi, I'm <b>Dropli</b> 💧 Welcome to Droplet!",
+                "Droplet shows and processes LILBID mass spectra.",
+                "Want a quick tour? It takes about a minute."],
+        "do": [("Show me around", "tutorial")],
+        "options": [
+            ("Maybe later",                    "welcome_later"),
+        ],
+    },
+    "welcome_later": {
+        "say": [f"No problem! The tour is always in {_m('Help', 'Quick Tour…')}",
+                "And whenever you're looking for something, just click me up here."],
+        "options": [
+            ("Got it, thanks!",                "bye"),
+            ("Actually, I have a question",    "start"),
+        ],
+    },
     "bye": {
         "say": ["Happy analysing! Click me whenever you need me. 👋"],
         "options": [],
@@ -413,7 +431,7 @@ NODES = {
         ],
     },
     "oth_tour": {
-        "say": ["The guided tour points at each part of the window, step by step."],
+        "say": ["I'll point at each part of the window, it takes about a minute."],
         "do": [("Start the tour", "tutorial")],
     },
     "oth_broken": {
