@@ -1,9 +1,22 @@
-"""TutorialOverlay - interactive step-by-step tutorial for first-time users."""
+"""TutorialOverlay - Dropli's quick tour of the main window.
+
+A semi-transparent overlay dims the window, spotlights one area at a time,
+and Dropli explains it in a speech bubble (same typewriter + talking mouth
+as the Dropli chat).  Kept deliberately short: the goal is to show where
+things are, Dropli's chat answers the "how do I…" questions afterwards.
+"""
+
+import os
 
 try:
     from PyQt6 import QtWidgets, QtCore, QtGui
 except ImportError:
     from pyqtgraph.Qt import QtWidgets, QtCore, QtGui
+
+from droplet_pkg.ui.windows.dropli import (
+    _Avatar, _Mouth, _load_frames, _plain_len, _truncate_html,
+    _ACCENT, _CHARS_PER_SECOND,
+)
 
 
 def _get_app():
@@ -11,244 +24,219 @@ def _get_app():
     return _m
 
 
-class TutorialOverlay(QtWidgets.QWidget):
-    """
-    Full-window semi-transparent overlay that spotlights a target widget
-    and shows an instruction bubble next to it.
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+#  Spotlight targets — resolved at runtime, each returns a QRect in the main
+#  window's coordinates (or None to centre the bubble with no spotlight)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # STEPS uses lambdas so all widget references are resolved at runtime
-    # against the live app module - no circular import issue.
+def _widget_rect(w):
+    if w is None or not w.isVisible():
+        return None
+    host = _get_app().main_win
+    return QtCore.QRect(w.mapTo(host, QtCore.QPoint(0, 0)), w.size())
+
+
+def _layout_rect(layout):
+    """Union of the visible widgets of a layout (ignores trailing stretch)."""
+    rect = QtCore.QRect()
+    for i in range(layout.count()):
+        w = layout.itemAt(i).widget()
+        r = _widget_rect(w) if w is not None else None
+        if r is not None:
+            rect = rect.united(r)
+    return rect if not rect.isEmpty() else None
+
+
+def _menu_titles_rect(*menus):
+    """The titles of some menus in the menu bar."""
+    a = _get_app()
+    bar = a.menu_bar
+    rect = QtCore.QRect()
+    for m in menus:
+        g = bar.actionGeometry(m.menuAction())
+        if not g.isEmpty():
+            rect = rect.united(g)
+    if rect.isEmpty():
+        return _widget_rect(bar)
+    return QtCore.QRect(bar.mapTo(a.main_win, rect.topLeft()), rect.size())
+
+
+def _files_body():
+    a = _get_app()
+    text = ("Your spectra live here. Pick the one to show in the dropdown; "
+            "<b>Mode</b> and <b>dt</b> filter the list using the file names.<br>"
+            "<b>+ Add Overlay</b> puts more spectra on top to compare them.")
+    try:
+        showing_examples = (os.path.normpath(a.base_dir)
+                            == os.path.normpath(a.EXAMPLE_DATA_DIR))
+    except Exception:
+        showing_examples = False
+    if showing_examples:
+        text += ("<br><br>These are example spectra I brought along. "
+                 "To open yours: <b>File → Open Folder…</b>, or drag files "
+                 "onto the window.")
+    else:
+        text += ("<br><br>Open more data with <b>File → Open Folder…</b>, "
+                 "or drag files onto the window.")
+    return text
+
+
+class TutorialOverlay(QtWidgets.QWidget):
+    """Full-window overlay: spotlight + Dropli explaining each step."""
+
+    # "target" returns a QRect (see helpers above), "body" is rich text or a
+    # callable returning it, "anchor" says where the bubble goes.
     STEPS = [
         {
-            "target":  lambda: _get_app().menu_bar,
-            "title":   "Menu bar",
-            "body":    "All main features are accessible from here.\n"
-                       "File, View, Analysis, Peaks, Plot, Display and Help.",
-            "anchor":  "below",
+            "target": lambda: _widget_rect(_get_app().files_section),
+            "title":  "Your files",
+            "body":   _files_body,
+            "anchor": "below",
         },
         {
-            "target":  lambda: _get_app().folder_path_label,
-            "title":   "Current folder",
-            "body":    "This shows which folder or virtual file list is loaded.\n"
-                       "Use  File → Open Folder  or drag-and-drop files to change it.",
-            "anchor":  "below",
+            "target": lambda: _widget_rect(_get_app().plot_widget),
+            "title":  "The plot",
+            "body":   "<b>Scroll</b> to zoom, <b>drag</b> to pan, and press "
+                      "<b>Z</b> to draw a zoom box.<br>"
+                      "Right-click → <b>Go to last zoom</b> steps back.",
+            "anchor": "center",
         },
         {
-            "target":  lambda: _get_app().files_section,
-            "title":   "Files & Overlays",
-            "body":    "Select the main spectrum file here.\n"
-                       "Use  neg / pos  to filter by polarity.\n"
-                       "Click  + Add Overlay  to load additional spectra on top.",
-            "anchor":  "below",
+            "target": lambda: _layout_rect(_get_app().tools_row),
+            "title":  "Display switches",
+            "body":   "Quick ways to look at your spectra: <b>Stacked</b> gives each "
+                      "one its own row, <b>Log Y</b> a log scale, and <b>σ Clip</b> "
+                      "hides the noise on screen.<br>"
+                      "None of these change your data.",
+            "anchor": "below",
         },
         {
-            "target":  lambda: _get_app().polarity_combo,
-            "title":   "Polarity filter",
-            "body":    "Switch between negative and positive mode.\n"
-                       "Only files containing 'neg' or 'pos' in their name are shown.",
-            "anchor":  "right",
+            "target": lambda: _menu_titles_rect(_get_app().analysis_menu,
+                                                _get_app().new_analysis_menu,
+                                                _get_app().peaks_menu),
+            "title":  "Where the work happens",
+            "body":   "<b>Processing</b>: baseline, recalibration, normalisation, "
+                      "for one spectrum or a whole folder.<br>"
+                      "<b>Analysis</b>: clusters, common/unique peaks, peak areas.<br>"
+                      "<b>Peaks</b>: your peak lists (<b>Ctrl+P</b>) and "
+                      "click-to-pick (<b>P</b>).",
+            "anchor": "below",
         },
         {
-            "target":  lambda: _get_app().combo,
-            "title":   "File selector",
-            "body":    "Choose which spectrum file to display as the main spectrum.\n"
-                       "The plot updates immediately when you change selection.",
-            "anchor":  "below",
+            "target": lambda: _menu_titles_rect(_get_app().file_menu,
+                                                _get_app().plot_menu),
+            "title":  "Keeping your work",
+            "body":   "<b>Plot</b> exports the figure (PNG, SVG, PDF, LaTeX).<br>"
+                      "<b>File → Save Project</b> keeps your whole session: files, "
+                      "overlays, peak lists and view.",
+            "anchor": "below",
         },
         {
-            "target":  lambda: _get_app().overlay_opacity_slider,
-            "title":   "Overlay opacity",
-            "body":    "Controls the transparency of all overlay spectra.\n"
-                       "Ctrl+Scroll or Ctrl+↑↓ also cycles through overlays one at a time.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: _get_app().highlight_slider,
-            "title":   "Highlight intensity",
-            "body":    "Controls how strongly highlighted peaks stand out.\n"
-                       "At maximum, peaks appear in their full chosen colour.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: _get_app().plot_widget,
-            "title":   "Spectrum plot",
-            "body":    "• Click and drag to pan.\n"
-                       "• Scroll wheel to zoom.\n"
-                       "• Press Z to toggle zoom-box mode.\n"
-                       "• Right-click for axis options.\n"
-                       "• Cross-lines follow your cursor showing m/z and intensity.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: (
-                _get_app().peaks_action.associatedWidgets()[0]
-                if _get_app().peaks_action.associatedWidgets()
-                else _get_app().menu_bar
-            ),
-            "title":   "Peak list  (Ctrl+P)",
-            "body":    "Open with  Peaks → Open Peaks List  or Ctrl+P.\n\n"
-                       "Each row highlights a set of m/z values on the spectrum.\n"
-                       "Rows can be defined by manual entry or as a range (start→end, step).\n"
-                       "Press P to enable click-to-pick mode on the plot.\n\n"
-                       "The Peaks window is a separate panel - open it to manage your peak lists.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().dt_combo,
-            "title":   "dt filter",
-            "body":    "Filter files by the dt value encoded in the filename (e.g. _dt071).\n"
-                       "Only dt values present for the selected polarity are shown.\n"
-                       "'All' disables the filter.\n"
-                       "Each overlay has its own independent dt filter.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().menu_bar,
-            "title":   "Processing menu",
-            "body":    "Baseline Correction and Recalibration are in the Processing menu.\n\n"
-                       "• airPLS / SNIP baseline correction removes background signal.\n"
-                       "• Auto-Recalibrate fits a quadratic TOF polynomial automatically.\n"
-                       "• Manual Recalibrate lets you choose anchor peaks yourself.\n"
-                       "• Normalize Spectrum - output a file with intensities scaled to 1.\n"
-                       "• Batch versions process entire folders.\n"
-                       "• Residuals are saved in a subfolder alongside output files.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().menu_bar,
-            "title":   "Analysis menu",
-            "body":    "Advanced analysis tools are in the Analysis menu.\n\n"
-                       "• Cluster Detection - finds repeating peak series (e.g. water clusters).\n"
-                       "• Compare Common/Unique Peaks - highlights shared and unique peaks "
-                       "across visible spectra with coloured vertical lines.\n"
-                       "• Measure Peak Area - interactive range measurement, total spectrum "
-                       "area, and peak-list area ratios.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().stacked_mode_chk,
-            "title":   "Stacked mode",
-            "body":    "Toggle 'Stacked' to view all visible spectra in separate sub-plots.\n\n"
-                       "Each row is normalised to 0–1 so heights are directly comparable. "
-                       "X axes are linked - panning one row moves all.\n\n"
-                       "The 'Log Y' checkbox beside it switches all rows to a logarithmic Y scale.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: _get_app().sigma3_clip_chk,
-            "title":   "Sigma noise clipping",
-            "body":    "The 'σ Clip' checkbox suppresses baseline noise on the main plot.\n\n"
-                       "The slider next to it (1.0 – 4.0 σ) sets how aggressively noise is clipped. "
-                       "Lower values clip more; higher values keep more of the baseline.\n\n"
-                       "This works independently of Dynamic Scale and is remembered between sessions.",
-            "anchor":  "above",
-        },
-        {
-            "target":  lambda: _get_app().menu_bar,
-            "title":   "Normalisation (Processing menu)",
-            "body":    "Processing → Normalize Spectrum scales intensities so the tallest peak = 1, "
-                       "or so a specific m/z value = 1.\n\n"
-                       "The result appears as an overlay with a 💾 Save button. "
-                       "A batch version processes an entire folder at once.\n\n"
-                       "No hard noise floor is applied - use σ Clip if you want to suppress baseline.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().dropli_button,
-            "title":   "Meet Dropli",
-            "body":    "Not sure where something is? Click Dropli, pick what you're "
-                       "trying to do, and it tells you where to go, or opens the tool "
-                       "for you.",
-            "anchor":  "below",
-        },
-        {
-            "target":  lambda: _get_app().menu_bar,
-            "title":   "You're all set!",
-            "body":    "That covers the main features.\n\n"
-                       "• Ask Dropli (top right) whenever you're stuck.\n"
-                       "• Hover over any button or slider for a tooltip.\n"
-                       "• Ctrl+Q to quit.",
-            "anchor":  "below",
+            "target": lambda: _widget_rect(_get_app().dropli_button),
+            "title":  "That's it!",
+            "body":   "Whenever you wonder where something is, click me: I'll tell "
+                      "you where to go, or open it for you. 💧<br>"
+                      "You can replay this tour from <b>Help → Quick Tour</b>.",
+            "anchor": "below",
         },
     ]
+
+    BODY_WIDTH = 300
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self.setWindowFlags(QtCore.Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self._step           = 0
         self._spotlight_rect = QtCore.QRect()
         self._parent_pixmap  = None
+        self._refreshing_pixmap = False
+        self._typing = None                   # [html, total, shown]
+        self._closed = False
 
+        self._mouth = _Mouth(self)
+        self._build_bubble()
+
+        self._type_timer = QtCore.QTimer(self)
+        self._type_timer.setInterval(max(10, int(1000 / _CHARS_PER_SECOND * 2)))
+        self._type_timer.timeout.connect(self._type_tick)
+
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+
+    def _build_bubble(self):
         self._bubble = QtWidgets.QFrame(self)
-        self._bubble.setObjectName("tutorialBubble")
-        self._bubble.setStyleSheet("""
-            QFrame#tutorialBubble {
-                background: #1e293b;
-                border: 1.5px solid #3b82f6;
-                border-radius: 10px;
-            }
-        """)
-        bubble_layout = QtWidgets.QVBoxLayout(self._bubble)
-        bubble_layout.setContentsMargins(14, 12, 14, 10)
-        bubble_layout.setSpacing(6)
+        self._bubble.setObjectName("tourBubble")
+        self._bubble.setStyleSheet(
+            f"#tourBubble {{ background: palette(window); border: 2px solid {_ACCENT};"
+            " border-radius: 12px; }")
+        outer = QtWidgets.QHBoxLayout(self._bubble)
+        outer.setContentsMargins(12, 12, 14, 10)
+        outer.setSpacing(12)
 
+        self._avatar = _Avatar(_load_frames(), self._mouth, 4)
+        outer.addWidget(self._avatar, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(6)
         self._title_lbl = QtWidgets.QLabel()
         self._title_lbl.setStyleSheet(
-            "color: #60a5fa; font-size: 13px; font-weight: bold; background: transparent;")
-        self._title_lbl.setWordWrap(True)
-        bubble_layout.addWidget(self._title_lbl)
+            f"color: {_ACCENT}; font-size: 13px; font-weight: bold;")
+        col.addWidget(self._title_lbl)
 
         self._body_lbl = QtWidgets.QLabel()
-        self._body_lbl.setStyleSheet(
-            "color: #e2e8f0; font-size: 11px; background: transparent;")
+        self._body_lbl.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self._body_lbl.setWordWrap(True)
-        self._body_lbl.setMinimumWidth(280)
-        self._body_lbl.setMaximumWidth(360)
-        bubble_layout.addWidget(self._body_lbl)
+        self._body_lbl.setFixedWidth(self.BODY_WIDTH)
+        self._body_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop
+                                    | QtCore.Qt.AlignmentFlag.AlignLeft)
+        col.addWidget(self._body_lbl)
 
-        ctrl_row = QtWidgets.QHBoxLayout()
+        ctrl = QtWidgets.QHBoxLayout()
+        ctrl.setSpacing(6)
         self._progress_lbl = QtWidgets.QLabel()
-        self._progress_lbl.setStyleSheet(
-            "color: #64748b; font-size: 10px; background: transparent;")
-        ctrl_row.addWidget(self._progress_lbl)
-        ctrl_row.addStretch()
+        self._progress_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        ctrl.addWidget(self._progress_lbl)
+        ctrl.addStretch()
 
-        _btn_style_secondary = (
-            "QPushButton { color: #94a3b8; background: transparent; "
-            "border: 1px solid #475569; border-radius: 4px; padding: 0 8px; }"
-            "QPushButton:hover { color: #e2e8f0; border-color: #94a3b8; }"
-        )
-        self._skip_btn = QtWidgets.QPushButton("Skip")
-        self._skip_btn.setFixedHeight(26)
-        self._skip_btn.setStyleSheet(_btn_style_secondary)
-        self._skip_btn.clicked.connect(self.close_tutorial)
-
+        secondary = ("QPushButton { color: gray; background: transparent; border: none;"
+                     " padding: 0 6px; }"
+                     "QPushButton:hover { color: palette(text); }"
+                     "QPushButton:disabled { color: transparent; }")
+        self._skip_btn = QtWidgets.QPushButton("Skip tour")
         self._back_btn = QtWidgets.QPushButton("← Back")
-        self._back_btn.setFixedHeight(26)
-        self._back_btn.setStyleSheet(_btn_style_secondary)
-        self._back_btn.clicked.connect(self._go_back)
-
+        for b in (self._skip_btn, self._back_btn):
+            b.setStyleSheet(secondary)
+            b.setFixedHeight(26)
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self._next_btn = QtWidgets.QPushButton("Next →")
         self._next_btn.setFixedHeight(26)
+        self._next_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self._next_btn.setStyleSheet(
-            "QPushButton { color: white; background: #3b82f6; "
-            "border: none; border-radius: 4px; padding: 0 12px; font-weight: bold; }"
-            "QPushButton:hover { background: #2563eb; }")
+            f"QPushButton {{ color: white; background: {_ACCENT}; border: none;"
+            " border-radius: 13px; padding: 0 14px; font-weight: bold; }"
+            "QPushButton:hover { background: #2567c0; }")
+        self._skip_btn.clicked.connect(self.close_tutorial)
+        self._back_btn.clicked.connect(self._go_back)
         self._next_btn.clicked.connect(self._go_next)
+        ctrl.addWidget(self._skip_btn)
+        ctrl.addWidget(self._back_btn)
+        ctrl.addWidget(self._next_btn)
+        col.addLayout(ctrl)
+        outer.addLayout(col)
 
-        ctrl_row.addWidget(self._skip_btn)
-        ctrl_row.addWidget(self._back_btn)
-        ctrl_row.addWidget(self._next_btn)
-        bubble_layout.addLayout(ctrl_row)
+    # ── Navigation ───────────────────────────────────────────────────────────
 
-        self._bubble.adjustSize()
+    def start(self):
+        self.show()
+        self.raise_()
+        self.setFocus()
         self._update_step()
 
     def _go_next(self):
-        if self._step < len(self.STEPS) - 1:
+        if self._typing is not None:          # first click finishes the sentence
+            self._finish_typing()
+        elif self._step < len(self.STEPS) - 1:
             self._step += 1
             self._update_step()
         else:
@@ -259,90 +247,150 @@ class TutorialOverlay(QtWidgets.QWidget):
             self._step -= 1
             self._update_step()
 
-    def _update_step(self):
-        _a   = _get_app()
+    def _update_step(self, animate=True):
         step = self.STEPS[self._step]
         n    = len(self.STEPS)
-        if "pre" in step:
-            try:
-                step["pre"](); _a.app.processEvents()
-            except Exception:
-                pass
+        body = step["body"]() if callable(step["body"]) else step["body"]
         self._title_lbl.setText(step["title"])
-        self._body_lbl.setText(step["body"])
         self._progress_lbl.setText(f"{self._step + 1} / {n}")
         self._back_btn.setEnabled(self._step > 0)
         is_last = self._step == n - 1
-        self._next_btn.setText("Finish" if is_last else "Next →")
+        self._next_btn.setText("Let's go!" if is_last else "Next →")
         self._skip_btn.setVisible(not is_last)
+
+        # Size the bubble for the full text first, so it doesn't grow while typing
+        self._body_lbl.ensurePolished()
+        doc = QtGui.QTextDocument()
+        doc.setDefaultFont(self._body_lbl.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(body)
+        doc.setTextWidth(self.BODY_WIDTH)
+        self._body_lbl.setFixedHeight(int(doc.size().height()) + 4)
+        self._bubble.layout().activate()
+        self._bubble.resize(self._bubble.sizeHint())
+        if animate:
+            self._typing = [body, _plain_len(body), 0]
+            self._body_lbl.setText("")
+            self._mouth.start()
+            self._type_timer.start()
+        else:
+            self._finish_typing()
+
         try:
-            target = step["target"]()
+            rect = step["target"]()
         except Exception:
-            target = None
-        self._compute_spotlight(target)
-        self._position_bubble(target, step.get("anchor", "below"))
+            rect = None
+        self._spotlight_rect = (rect.adjusted(-6, -6, 6, 6) if rect is not None
+                                else QtCore.QRect())
+        self._position_bubble(step.get("anchor", "below"))
         self._refresh_parent_pixmap()
         self.update()
 
-    def _compute_spotlight(self, target):
-        if target is None or not target.isVisible():
-            self._spotlight_rect = QtCore.QRect(); return
-        tl = target.mapTo(self.parent(), QtCore.QPoint(0, 0))
-        self._spotlight_rect = QtCore.QRect(tl, target.size()).adjusted(-6, -6, 6, 6)
+    # ── Typewriter ───────────────────────────────────────────────────────────
 
-    def _position_bubble(self, target, anchor):
-        self._bubble.adjustSize()
+    def _type_tick(self):
+        if self._typing is None:
+            self._type_timer.stop()
+            return
+        html, total, shown = self._typing
+        shown = min(total, shown + 2)
+        self._typing[2] = shown
+        self._body_lbl.setText(_truncate_html(html, shown))
+        if shown >= total:
+            self._finish_typing()
+
+    def _finish_typing(self):
+        self._type_timer.stop()
+        if self._typing is not None:
+            self._body_lbl.setText(self._typing[0])
+            self._typing = None
+        self._mouth.stop()
+
+    # ── Layout & painting ────────────────────────────────────────────────────
+
+    def _position_bubble(self, anchor):
         bw = self._bubble.width(); bh = self._bubble.height()
         pw = self.width();         ph = self.height()
         pad = 14
-        if target is None or not target.isVisible() or self._spotlight_rect.isEmpty():
-            self._bubble.move((pw - bw) // 2, (ph - bh) // 2); return
         sr = self._spotlight_rect
-        if anchor == "below":
-            x = max(pad, min(sr.left(), pw - bw - pad))
-            y = min(sr.bottom() + pad, ph - bh - pad)
+        if sr.isEmpty() or anchor == "center":
+            if sr.isEmpty():
+                x, y = (pw - bw) // 2, (ph - bh) // 2
+            else:
+                x, y = sr.center().x() - bw // 2, sr.center().y() - bh // 2
         elif anchor == "above":
-            x = max(pad, min(sr.left(), pw - bw - pad))
-            y = max(pad, sr.top() - bh - pad)
-        elif anchor == "right":
-            x = min(sr.right() + pad, pw - bw - pad)
-            y = max(pad, min(sr.top(), ph - bh - pad))
-        elif anchor == "left":
-            x = max(pad, sr.left() - bw - pad)
-            y = max(pad, min(sr.top(), ph - bh - pad))
-        else:
-            x = (pw - bw) // 2; y = (ph - bh) // 2
+            x, y = sr.left(), sr.top() - bh - pad
+        else:                                    # below (right-aligned if near the right edge)
+            x = sr.left() if sr.left() + bw < pw - pad else sr.right() - bw
+            y = sr.bottom() + pad
+        x = max(pad, min(x, pw - bw - pad))
+        y = max(pad, min(y, ph - bh - pad))
         self._bubble.move(x, y)
 
     def _refresh_parent_pixmap(self):
-        if getattr(self, '_refreshing_pixmap', False): return
+        if self._refreshing_pixmap:
+            return
         self._refreshing_pixmap = True
         try:
             self.hide(); self._parent_pixmap = self.parent().grab(); self.show()
+            self.raise_(); self.setFocus()
         finally:
             self._refreshing_pixmap = False
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 160))
+        painter.fillRect(self.rect(), QtGui.QColor(0, 0, 0, 150))
         if not self._spotlight_rect.isEmpty() and self._parent_pixmap is not None:
-            painter.drawPixmap(self._spotlight_rect, self._parent_pixmap, self._spotlight_rect)
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(QtCore.QRectF(self._spotlight_rect), 8, 8)
+            painter.save()
+            painter.setClipPath(path)
+            dpr = self._parent_pixmap.devicePixelRatio()
+            src = QtCore.QRectF(self._spotlight_rect)
+            src = QtCore.QRectF(src.x() * dpr, src.y() * dpr,
+                                src.width() * dpr, src.height() * dpr)
+            painter.drawPixmap(QtCore.QRectF(self._spotlight_rect),
+                               self._parent_pixmap, src)
+            painter.restore()
             painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-            painter.setPen(QtGui.QPen(QtGui.QColor("#3b82f6"), 2.0))
-            painter.drawRoundedRect(self._spotlight_rect, 6, 6)
+            painter.setPen(QtGui.QPen(QtGui.QColor(_ACCENT), 2.5))
+            painter.drawPath(path)
         painter.end()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if not getattr(self, '_refreshing_pixmap', False):
-            self._update_step()
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() == QtCore.QEvent.Type.Resize \
+                and not self._refreshing_pixmap:
+            self.setGeometry(self.parent().rect())
+            QtCore.QTimer.singleShot(0, lambda: None if self._closed
+                                     else self._update_step(animate=False))
+        return False
 
-    def close_tutorial(self):
-        self.hide(); self.deleteLater()
+    # ── Input ────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        if not self._bubble.geometry().contains(event.pos()):
-            self._go_next()
+        if self._bubble.geometry().contains(event.position().toPoint()):
+            self._finish_typing()               # click on the bubble: show it all
         else:
-            super().mousePressEvent(event)
+            self._go_next()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        K = QtCore.Qt.Key
+        if key == K.Key_Escape:
+            self.close_tutorial()
+        elif key in (K.Key_Right, K.Key_Return, K.Key_Enter, K.Key_Space):
+            self._go_next()
+        elif key == K.Key_Left:
+            self._go_back()
+        else:
+            super().keyPressEvent(event)
+
+    def close_tutorial(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._finish_typing()
+        self.parent().removeEventFilter(self)
+        self.hide(); self.deleteLater()
