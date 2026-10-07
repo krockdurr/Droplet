@@ -30,7 +30,7 @@ _FRAME_FILES = {
     "open":    "Dropli_mouth_fully_open.png",
 }
 # Mouth cycle while talking
-_TALK_CYCLE = ["partial", "open", "partial", "closed"]
+_TALK_CYCLE = ["open", "closed"]
 _TALK_FRAME_MS = 85
 
 _CHARS_PER_SECOND = 110       # typewriter speed

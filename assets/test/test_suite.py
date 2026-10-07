@@ -1858,7 +1858,8 @@ def run_with_gui():
     qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
     win = QtWidgets.QWidget()
-    win.setWindowTitle("Droplet Test Suite")
+    _WIN_TITLE = "Droplet Test Suite"
+    win.setWindowTitle(_WIN_TITLE)
     icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
     if icon.exists():
         win.setWindowIcon(QtGui.QIcon(str(icon)))
@@ -1903,6 +1904,14 @@ def run_with_gui():
     summary = QtWidgets.QLabel("Press 'Run All Tests' to start.")
     summary.setStyleSheet("font-size: 11px; color: gray;")
     root.addWidget(summary)
+
+    # ── progress bar (visible only while running) ──
+    progress = QtWidgets.QProgressBar()
+    progress.setRange(0, len(CATEGORIES))
+    progress.setTextVisible(True)
+    progress.setFixedHeight(18)
+    progress.setVisible(False)
+    root.addWidget(progress)
 
     # ── buttons ──
     btn_row  = QtWidgets.QHBoxLayout()
@@ -1969,7 +1978,11 @@ def run_with_gui():
         run_btn.setEnabled(False)
         save_btn.setEnabled(False)
         copy_btn.setEnabled(False)
-        summary.setText("Running…")
+        run_btn.setText("Running…")
+        summary.setVisible(False)
+        progress.setValue(0)
+        progress.setVisible(True)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         table.setRowCount(0)
         _all_results.clear()
 
@@ -1980,11 +1993,32 @@ def run_with_gui():
 
         def _run_next():
             if not remaining:
+                QtWidgets.QApplication.restoreOverrideCursor()
+                progress.setVisible(False)
+                summary.setVisible(True)
                 _refresh_summary()
+                run_btn.setText("▶  Run All Tests")
                 run_btn.setEnabled(True)
+                win.setWindowTitle(_WIN_TITLE)
                 return
             cat_name, cat_fn = remaining.pop(0)
-            summary.setText(f"Running: {cat_name}…")
+            progress.setFormat(f"%v / %m  —  {cat_name}")
+            win.setWindowTitle(
+                f"{_WIN_TITLE} — {progress.value() + 1}/{progress.maximum()}")
+
+            # Temporary placeholder row for the category being run
+            placeholder = table.rowCount()
+            table.insertRow(placeholder)
+            table.setRowHeight(placeholder, 22)
+            for col, text in enumerate(["⏳", cat_name, "running…", ""]):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setForeground(QtGui.QBrush(QtGui.QColor("gray")))
+                if col == 2:
+                    f = item.font()
+                    f.setItalic(True)
+                    item.setFont(f)
+                table.setItem(placeholder, col, item)
+            table.scrollToBottom()
             QtCore.QCoreApplication.processEvents()
             try:
                 cat_results = cat_fn()
@@ -1992,7 +2026,9 @@ def run_with_gui():
                 cat_results = [TestResult(cat_name, FAIL,
                                           f"{type(exc).__name__}: {exc}")]
             _all_results.append((cat_name, cat_results))
+            table.removeRow(placeholder)
             _append_category_rows(cat_name, cat_results)
+            progress.setValue(progress.value() + 1)
             QtCore.QTimer.singleShot(0, _run_next)
 
         QtCore.QTimer.singleShot(0, _run_next)

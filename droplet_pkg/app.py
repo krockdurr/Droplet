@@ -508,6 +508,9 @@ def _on_main_win_close(event):
     if _area_win_ref is not None:
         try: _area_win_ref.close()
         except Exception: pass
+    if _residuals_viewer_ref is not None:
+        try: _residuals_viewer_ref.close()
+        except Exception: pass
     event.accept()
 
 quit_shortcut.activated.connect(main_win.close)
@@ -6881,7 +6884,9 @@ def _open_residuals_viewer(res_folder=None):
                 return
         except Exception:
             pass
-    _residuals_viewer_ref = ResidualsViewerWindow(res_folder=res_folder, parent=main_win)
+    # No parent: a parented window is "transient" for main_win, which pins it
+    # above Droplet and stops the WM from snapping it. Closed in _on_main_win_close.
+    _residuals_viewer_ref = ResidualsViewerWindow(res_folder=res_folder, parent=None)
     _residuals_viewer_ref.show()
     _residuals_viewer_ref.raise_()
 
@@ -8844,11 +8849,16 @@ def on_polarity_changed():
     else:
         plot_file(None)
 
-def refresh_all_combos():
+def refresh_all_combos(select_all=False):
     global all_txt_files
     all_txt_files = list_all_txt_files()
-    _refresh_dt_combo()        # repopulate dt filter
-    _auto_select_polarity()    # auto-switch polarity if needed
+    if select_all:             # freshly opened folder: show every mode and dt
+        for cb in (polarity_combo, dt_combo):
+            cb.blockSignals(True); cb.setCurrentIndex(max(cb.findText("All"), 0)); cb.blockSignals(False)
+        _refresh_dt_combo()
+    else:
+        _refresh_dt_combo()        # repopulate dt filter
+        _auto_select_polarity()    # auto-switch polarity if needed
     files = get_txt_files_filtered(polarity_combo.currentText(), dt_combo.currentText())
     _populate_main_combo(files)
     if files:
@@ -8880,12 +8890,12 @@ def open_folder(path=None):
                 "This virtual folder no longer has associated files."); return
         is_virtual = True; virtual_file_list = file_list
         add_recent_folder(path); update_recent_folders_menu()
-        update_folder_label(); refresh_all_combos(); return
+        update_folder_label(); refresh_all_combos(select_all=True); return
     if not os.path.isdir(path): return
     is_virtual = False; virtual_file_list = []
     base_dir = path; settings.setValue("base_dir", base_dir)
     add_recent_folder(path); update_recent_folders_menu()
-    update_folder_label(); refresh_all_combos()
+    update_folder_label(); refresh_all_combos(select_all=True)
 
 def open_individual_files():
     global is_virtual, virtual_file_list, all_txt_files

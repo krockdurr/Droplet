@@ -80,11 +80,15 @@ class ResidualsViewerWindow(QtWidgets.QDialog, StayOnTopMixin):
         self.resize(1050, 600)
         self.setMinimumSize(700, 420)
 
-        # Allow the window to be maximised / snapped to screen edges
+        # Normal top-level window (not a Dialog type) so the window manager
+        # treats it independently: no forced stacking above Droplet, and it
+        # can be maximised / snapped to screen edges.
         self.setWindowFlags(
-            self.windowFlags()
-            | QtCore.Qt.WindowType.WindowMaximizeButtonHint
-            | QtCore.Qt.WindowType.WindowMinimizeButtonHint
+            QtCore.Qt.WindowType.Window
+            | QtCore.Qt.WindowType.WindowTitleHint
+            | QtCore.Qt.WindowType.WindowSystemMenuHint
+            | QtCore.Qt.WindowType.WindowMinMaxButtonsHint
+            | QtCore.Qt.WindowType.WindowCloseButtonHint
         )
 
         # ── Top bar ──────────────────────────────────────────────────────────

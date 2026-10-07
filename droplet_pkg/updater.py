@@ -45,6 +45,7 @@ The logic itself is split into two UI-independent steps:
 import argparse
 import json
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -111,9 +112,31 @@ def local_version() -> str:
 
 # ── GitHub access ─────────────────────────────────────────────────────────────
 
+def _ssl_context() -> ssl.SSLContext:
+    """System certificates plus certifi's bundle when available.
+
+    python.org's macOS Python ships without trusted certificates unless
+    "Install Certificates.command" was run, so every HTTPS request fails with
+    CERTIFICATE_VERIFY_FAILED.  pip vendors certifi, so it is always in the venv.
+    """
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+    except ImportError:
+        try:
+            from pip._vendor import certifi
+        except ImportError:
+            return ctx
+    try:
+        ctx.load_verify_locations(certifi.where())
+    except (OSError, ssl.SSLError):
+        pass
+    return ctx
+
+
 def _urlopen(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": "Droplet-updater"})
-    return urllib.request.urlopen(req, timeout=TIMEOUT)
+    return urllib.request.urlopen(req, timeout=TIMEOUT, context=_ssl_context())
 
 
 def resolve_branch() -> str:
@@ -243,6 +266,13 @@ def _download_release(branch: str, dest: Path, log: Log) -> Path:
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(extract_dir)
+            # extractall drops Unix permissions: restore the executable bit,
+            # or the .command/.sh installers can no longer be double-clicked.
+            for info in zf.infolist():
+                exec_bits = (info.external_attr >> 16) & 0o111
+                if exec_bits and not info.is_dir():
+                    path = extract_dir / info.filename
+                    path.chmod(path.stat().st_mode | exec_bits)
     except zipfile.BadZipFile as exc:
         raise UpdateError(f"Downloaded file is not a valid ZIP: {exc}") from exc
 
