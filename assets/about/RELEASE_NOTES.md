@@ -2,6 +2,37 @@
 
 ---
 
+# Interface redesign (testing ward)
+
+> A new main window layout and an application-wide theme. No processing or analysis code changed; every existing menu entry is still where it was.
+
+## Main window
+
+- **Toolbar** with drawn icons under the menu bar: open folder / files, reload, the mouse modes (pan, zoom box, pick peaks, with *Pick into* next to it while picking), Log Y, Stacked, σ clip, grid, cross-lines, Peaks, dock peaks, legend, ratio, areas, clusters, an **Export** menu (PNG, SVG, PDF, PGF, batch, print) and copy. The buttons are the menu actions themselves, so both always agree.
+- **Sidebar** (hide with **Ctrl+B**, resizable, width remembered) with three foldable cards:
+  - **Data**: folder name and path, main spectrum toggle + colour + reload, Mode / dt / Separator filters, and a **file list** instead of a dropdown. Each LILBID file shows its sample name, then a coloured pos / neg tag, dt, date and processing tags. A filter box narrows the list; **Alt+↑ / Alt+↓** or the arrows under it step through the files.
+  - **Overlays**: each overlay is a small card (colour, on/off, mode, dt, remove / file). **Add overlay** now turns the new overlay on straight away, showing the file after the main one.
+  - **Display**: highlight and overlay sliders, σ clip level, View-all lower m/z, Log Y / Stacked / Dynamic scale.
+- **Status bar**: m/z and intensity under the cursor (true intensity also in log mode) and the current mouse mode. The readout in the plot corner, which covered the legend, is now off by default (*View → Cursor Readout in Plot Corner*).
+- **Dark mode** (Display → Dark, the moon button, or **Ctrl+Shift+D**) now darkens the whole interface, every tool window included, not only the plot.
+- Minimum window width went from about 1030 px to about 840 px.
+
+## Peaks list
+
+- Opens at a usable size (it used to shrink to a one-row list every time it opened) and rows keep their natural height.
+- The buttons are on top, the list in the middle, and the label / auto-peak options in a card at the bottom.
+- **Dock under the plot** (Peaks menu, its File menu, or the toolbar): the peaks list becomes a panel of the main window. **Ctrl+P** shows / hides it. While docked, *Save* peak list is **Ctrl+Alt+S** (Ctrl+S saves the project).
+
+## Fixes
+
+- **Ctrl+Shift+P** was both *Print* and *add a peak row*, so neither worked. Print is now **Ctrl+Alt+P**.
+- Toggling Log Y from the View menu rendered the plot twice.
+- *Open Peaks List* was connected twice.
+- **Ctrl+O** opens a folder.
+- Dropli's answers and the Quick Tour describe the new layout (and Ctrl+Scroll correctly: it shows overlays one at a time, it does not change opacity).
+
+---
+
 # v3.0 – v3.3
 
 > Major release. Versions 3.0 to 3.3 are described together, as changes compared with v2.7.2: one-click installers and uninstallers for all platforms, a new project layout, an updater that runs at launch, side-by-side previous versions, Dropli (a clickable in-app guide), peak-list groups, a reworked legend, a peak boundary checker, a peak ratio tool, a residuals preview for manual recalibration, PGF export for LaTeX, processing metadata in output files, faster stacked mode, example spectra and a built-in test suite.

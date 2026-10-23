@@ -1,5 +1,24 @@
+# Python bytecode caches
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Virtual environments
+venv/
 .venv/
-droplet_backup_*/
-previous_versions/
+env/
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Editor and OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

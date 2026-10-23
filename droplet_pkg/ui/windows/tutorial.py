@@ -63,9 +63,12 @@ def _menu_titles_rect(*menus):
 
 def _files_body():
     a = _get_app()
-    text = ("Your spectra live here. Pick the one to show in the dropdown; "
-            "<b>Mode</b> and <b>dt</b> filter the list using the file names.<br>"
-            "<b>+ Add Overlay</b> puts more spectra on top to compare them.")
+    text = ("Your spectra live here. Click one in the list to show it, or step "
+            "through them with <b>Alt+↑ / Alt+↓</b>; <b>Mode</b>, <b>dt</b> and the "
+            "filter box narrow the list down.<br>"
+            "<b>Add overlay</b> puts more spectra on top to compare them, and "
+            "<b>Display</b> holds the sliders. Fold any card by clicking its title, "
+            "or hide the whole sidebar with <b>Ctrl+B</b>.")
     try:
         showing_examples = (os.path.normpath(a.base_dir)
                             == os.path.normpath(a.EXAMPLE_DATA_DIR))
@@ -88,10 +91,10 @@ class TutorialOverlay(QtWidgets.QWidget):
     # callable returning it, "anchor" says where the bubble goes.
     STEPS = [
         {
-            "target": lambda: _widget_rect(_get_app().files_section),
+            "target": lambda: _widget_rect(_get_app().sidebar_scroll),
             "title":  "Your files",
             "body":   _files_body,
-            "anchor": "below",
+            "anchor": "right",
         },
         {
             "target": lambda: _widget_rect(_get_app().plot_widget),
@@ -102,12 +105,14 @@ class TutorialOverlay(QtWidgets.QWidget):
             "anchor": "center",
         },
         {
-            "target": lambda: _layout_rect(_get_app().tools_row),
-            "title":  "Display switches",
-            "body":   "Quick ways to look at your spectra: <b>Stacked</b> gives each "
-                      "one its own row, <b>Log Y</b> a log scale, and <b>σ Clip</b> "
-                      "hides the noise on screen.<br>"
-                      "None of these change your data.",
+            "target": lambda: _widget_rect(_get_app().main_toolbar),
+            "title":  "The toolbar",
+            "body":   "Hover any button to see what it does. From the left: open files, "
+                      "the mouse modes (<b>pan</b>, <b>zoom box</b>, <b>pick peaks</b>), "
+                      "display switches (<b>Log Y</b>, <b>Stacked</b>, <b>σ clip</b>, grid, "
+                      "cross-lines), your <b>Peaks</b> lists and peak tools, then export.<br>"
+                      "The display switches never change your data. The moon on the right "
+                      "switches to dark mode.",
             "anchor": "below",
         },
         {
@@ -320,6 +325,8 @@ class TutorialOverlay(QtWidgets.QWidget):
                 x, y = sr.center().x() - bw // 2, sr.center().y() - bh // 2
         elif anchor == "above":
             x, y = sr.left(), sr.top() - bh - pad
+        elif anchor == "right":
+            x, y = sr.right() + pad, sr.top()
         else:                                    # below (right-aligned if near the right edge)
             x = sr.left() if sr.left() + bw < pw - pad else sr.right() - bw
             y = sr.bottom() + pad

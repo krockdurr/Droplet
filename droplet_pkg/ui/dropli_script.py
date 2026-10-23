@@ -94,16 +94,17 @@ NODES = {
         "do": [("Open a project", "open_project")],
     },
     "load_problem": {
-        "say": ["Check the <b>Sep</b> dropdown in the Files row: it sets the column "
+        "say": ["Check the <b>Separator</b> dropdown in the sidebar's Data card: it sets the column "
                 "separator. <i>Auto-detect</i> works for most files, but you can force "
                 "tab, comma, space…",
-                "The ↺ button (or <b>F5</b>) reloads the file from disk."],
+                "The reload button next to <i>Main spectrum</i> (or <b>F5</b>) reloads the file from disk."],
     },
     "load_filters": {
         "say": ["The file list is filtered by the <b>Mode</b> (neg / pos / All) and "
                 "<b>dt</b> dropdowns, using <i>_neg_</i> / <i>_pos_</i> and "
                 "<i>_dtNNN</i> in the file names.",
-                "Set both to <b>All</b> to see every file."],
+                "Set both to <b>All</b> to see every file. The <i>Filter files…</i> box above the "
+                "list narrows it down by name."],
     },
 
     # ── Comparing spectra ─────────────────────────────────────────────────────
@@ -118,22 +119,23 @@ NODES = {
         ],
     },
     "cmp_overlay": {
-        "say": ["Click <b>+ Add Overlay</b> under the main file and pick a spectrum. "
+        "say": ["Click <b>Add overlay</b> in the sidebar's Overlays card: it shows the next file, "
+                "pick another one in its dropdown if you like. "
                 "Each overlay has its own mode, dt and colour.",
-                "The <b>Overlay opacity</b> slider (or <b>Ctrl+Scroll</b>) sets how "
-                "transparent they are."],
+                "The <b>Overlays</b> slider in the Display card sets how transparent they are; "
+                "<b>Ctrl+Scroll</b> over the plot shows them one at a time."],
         "do": [("Add an overlay", "add_overlay")],
     },
     "cmp_stacked": {
         "say": [f"Turn on {_m('View', 'Stacked Spectra Mode')} (or the <b>Stacked</b> "
-                "checkbox). Each spectrum gets its own row, scaled 0–1, with a shared "
+                "button in the toolbar). Each spectrum gets its own row, scaled 0–1, with a shared "
                 "m/z axis.",
-                "<b>Log Y</b> next to it switches all rows to a log scale."],
+                "<b>Log Y</b>, the button just before it, switches all rows to a log scale."],
         "do": [("Turn on stacked mode", "stacked_on")],
     },
     "cmp_dynscale": {
-        "say": [f"Turn on {_m('View', 'Dynamic Scale')} (or <b>Dyn Scale</b> in the "
-                "toolbar). All spectra are scaled to the same tallest peak, with noise "
+        "say": [f"Turn on {_m('View', 'Dynamic Scale')} (or <b>Dynamic scale</b> in the "
+                "sidebar's Display card). All spectra are scaled to the same tallest peak, with noise "
                 "clipped so it doesn't skew the scaling."],
         "do": [("Turn on Dynamic Scale", "dynscale_on")],
     },
@@ -232,7 +234,7 @@ NODES = {
                ("Normalise a folder", "normalize_batch")],
     },
     "proc_sigma": {
-        "say": ["Tick <b>σ Clip</b> in the toolbar. It raises the noise floor on screen "
+        "say": ["Click <b>σ</b> in the toolbar (or tick <b>σ clip</b> in the sidebar). It raises the noise floor on screen "
                 "without touching your data; the slider next to it goes from 1 σ "
                 "(clips more) to 4 σ (keeps more)."],
         "do": [("Turn on σ Clip", "sigma_on")],

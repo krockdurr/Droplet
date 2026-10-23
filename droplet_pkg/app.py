@@ -467,11 +467,17 @@ if app is None:
     # too short. Qt6 handles DPI correctly on its own without this attribute.
 
 splash_step(45, "Preparing the main window…")
+# Theme first, so every widget below is created with the final look
+from droplet_pkg.ui import theme as _theme
+from droplet_pkg.ui.icons import icon as _icon, themed as _themed_icons
+_theme.install_compact_button_watcher(app)
+_theme.apply_theme(app, settings.value("display_mode", "bright"))
+
 main_win = QtWidgets.QWidget()
 main_win.setAcceptDrops(True)
 main_layout = QtWidgets.QVBoxLayout()
-main_layout.setSpacing(2)
-main_layout.setContentsMargins(4, 4, 4, 4)
+main_layout.setSpacing(0)
+main_layout.setContentsMargins(0, 0, 0, 0)
 main_win.setLayout(main_layout)
 quit_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Q"), main_win)
 quit_shortcut.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
@@ -604,8 +610,12 @@ def _add_to_saved_peak_files(path):
 pw_pick_mode_action = QtWidgets.QAction("Pick Peaks Mode  [P]", peaks_win, checkable=True)
 
 def open_peaks_window():
+    # Size it once so the list has room; after that keep the user's size
+    # (adjustSize() used to shrink it back to a one-row list on every open)
+    if not peaks_win.property("droplet_sized"):
+        peaks_win.resize(max(peaks_win.sizeHint().width(), 1060), 640)
+        peaks_win.setProperty("droplet_sized", True)
     peaks_win.show()
-    peaks_win.adjustSize()
     peaks_win.raise_()
     peaks_win.activateWindow()
 
@@ -618,6 +628,7 @@ menu_bar = QtWidgets.QMenuBar()
 # ── File ──────────────────────────────────────
 file_menu = menu_bar.addMenu("File")
 open_folder_action  = QtWidgets.QAction("Open Folder…",          main_win)
+open_folder_action.setShortcut(QtGui.QKeySequence("Ctrl+O"))
 open_files_action   = QtWidgets.QAction("Open Individual Files…", main_win)
 refresh_action      = QtWidgets.QAction("Refresh Current File",   main_win)
 refresh_action.setShortcut(QtGui.QKeySequence("F5"))
@@ -742,6 +753,16 @@ _stacked_lock_ymax_wa = QtWidgets.QWidgetAction(main_win)
 _stacked_lock_ymax_wa.setDefaultWidget(_stacked_lock_ymax_container)
 view_menu.addAction(_stacked_lock_ymax_wa)
 
+plot_readout_action = QtWidgets.QAction("Cursor Readout in Plot Corner", main_win, checkable=True)
+plot_readout_action.setChecked(settings.value("plot_corner_readout", False, type=bool))
+plot_readout_action.setToolTip(
+    "The m/z and intensity under the cursor are always shown in the status bar;\n"
+    "this also shows them in the top-right corner of the plot.")
+plot_readout_action.toggled.connect(lambda v: (
+    settings.setValue("plot_corner_readout", v),
+    None if v else hover_label.setText("")))
+view_menu.addAction(plot_readout_action)
+
 mz_cursor_action = QtWidgets.QAction("Show m/z at Cursor", main_win, checkable=True)
 mz_cursor_action.setChecked(settings.value("mz_cursor", False, type=bool))
 view_menu.addAction(mz_cursor_action)
@@ -851,7 +872,7 @@ new_analysis_menu.addAction(ratio_mode_action)
 peaks_menu   = menu_bar.addMenu("Peaks")
 peaks_action = QtWidgets.QAction("Open Peaks List", main_win)
 peaks_action.setShortcut(QtGui.QKeySequence("Ctrl+P"))
-peaks_action.triggered.connect(open_peaks_window)
+peaks_action.triggered.connect(lambda: _toggle_or_open_peaks())
 peaks_menu.addAction(peaks_action)
 peaks_menu.addSeparator()
 pick_mode_action = QtWidgets.QAction("Pick Peaks Mode  [P]", main_win, checkable=True)
@@ -883,7 +904,7 @@ copy_plot_action        = QtWidgets.QAction("Copy Plot to Clipboard",     main_w
 copy_plot_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+C"))
 export_peaks_csv_action = QtWidgets.QAction("Export Peak Data as CSV…",  main_win)
 print_action            = QtWidgets.QAction("Print…",                    main_win)
-print_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+P"))
+print_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+P"))   # Ctrl+Shift+P adds a peak row
 plot_menu.addAction(export_png_action)
 plot_menu.addAction(export_svg_action)
 plot_menu.addAction(export_pdf_action)
@@ -1013,20 +1034,131 @@ view_menu.installEventFilter(_keep_open_filter)
 display_menu.installEventFilter(_keep_open_filter)
 
 # ─────────────────────────────────────────────
-#  Folder path label
+#  Window layout:   menu bar
+#                   icon toolbar
+#                   sidebar | plot          (splitter, sidebar can be hidden)
+#                   status bar
 # ─────────────────────────────────────────────
-folder_path_label = QtWidgets.QLabel()
-folder_path_label.setWordWrap(True)
-folder_path_label.setStyleSheet("font-size: 10px; color: gray; padding: 1px 4px;")
-main_layout.addWidget(folder_path_label)
+main_toolbar = QtWidgets.QToolBar("Main toolbar")
+main_toolbar.setObjectName("MainToolbar")
+main_toolbar.setIconSize(QtCore.QSize(20, 20))
+main_toolbar.setMovable(False)
+main_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+main_layout.addWidget(main_toolbar)
+
+_body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+_body_splitter.setChildrenCollapsible(False)
+main_layout.addWidget(_body_splitter, 1)
+
+sidebar = QtWidgets.QWidget()
+sidebar.setObjectName("Sidebar")
+sidebar_layout = QtWidgets.QVBoxLayout(sidebar)
+sidebar_layout.setContentsMargins(10, 10, 6, 10)
+sidebar_layout.setSpacing(10)
+sidebar_scroll = QtWidgets.QScrollArea()
+sidebar_scroll.setObjectName("Sidebar")
+sidebar_scroll.setWidget(sidebar)
+sidebar_scroll.setWidgetResizable(True)
+sidebar_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+sidebar_scroll.setMinimumWidth(270)
+_body_splitter.addWidget(sidebar_scroll)
+
+_center = QtWidgets.QWidget()
+_center_layout = QtWidgets.QVBoxLayout(_center)
+_center_layout.setContentsMargins(4, 6, 8, 4)
+_center_layout.setSpacing(4)
+_body_splitter.addWidget(_center)
+_body_splitter.setStretchFactor(0, 0)
+_body_splitter.setStretchFactor(1, 1)
+_body_splitter.setSizes([int(settings.value("sidebar_width", 310)), 1100])
+_body_splitter.splitterMoved.connect(
+    lambda *_: settings.setValue("sidebar_width", _body_splitter.sizes()[0])
+    if _body_splitter.sizes()[0] > 0 else None)
+
+
+def _make_card(title, parent_layout=None, stretch=0):
+    """A rounded sidebar group with a small-caps title that folds the card
+    (remembered between sessions). Returns (card, body layout, header layout);
+    widgets added to the header layout sit on the right of the title."""
+    card = QtWidgets.QFrame()
+    card.setObjectName("Card")
+    outer = QtWidgets.QVBoxLayout(card)
+    outer.setContentsMargins(12, 8, 10, 12)
+    outer.setSpacing(6)
+    head = QtWidgets.QHBoxLayout()
+    head.setSpacing(2)
+    t = QtWidgets.QToolButton()
+    t.setObjectName("CardTitleButton")
+    t.setText(title.upper())
+    t.setCheckable(True)
+    t.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    t.setIconSize(QtCore.QSize(12, 12))
+    t.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+    t.setToolTip("Click to fold / unfold")
+    head.addWidget(t)
+    head.addStretch()
+    outer.addLayout(head)
+    body = QtWidgets.QWidget()
+    lay = QtWidgets.QVBoxLayout(body)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(8)
+    outer.addWidget(body, 1)
+    key = f"sidebar/folded/{title}"
+
+    def _fold(folded, save=True):
+        body.setVisible(not folded)
+        _themed_icons.set(t, "next" if folded else "down")
+        if parent_layout is not None:
+            parent_layout.setStretchFactor(card, 0 if folded else stretch)
+        if save:
+            settings.setValue(key, folded)
+    t.toggled.connect(_fold)
+    if parent_layout is not None:
+        parent_layout.addWidget(card, stretch)
+    folded = settings.value(key, False, type=bool)
+    t.setChecked(folded)
+    _fold(folded, save=False)
+    return card, lay, head
+
+
+def _icon_button(name, tip, slot=None, checkable=False):
+    b = QtWidgets.QToolButton()
+    b.setAutoRaise(True)
+    b.setIconSize(QtCore.QSize(18, 18))
+    b.setToolTip(tip)
+    b.setCheckable(checkable)
+    _themed_icons.set(b, name)
+    if slot is not None:
+        b.clicked.connect(slot)
+    return b
+
+
+def _muted(text=""):
+    lbl = QtWidgets.QLabel(text)
+    lbl.setProperty("role", "muted")
+    return lbl
+
+
+# ── Folder header (top of the Data card) ──
+folder_name_label = QtWidgets.QLabel()
+folder_name_label.setObjectName("FolderName")
+folder_path_label = _muted()
+folder_path_label.setStyleSheet("font-size: 8pt;")
+folder_path_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+
 
 def update_folder_label():
     if is_virtual:
-        folder_path_label.setText("📂 Virtual folder")
+        name, path = "Virtual folder", "Files picked one by one"
     elif base_dir:
-        folder_path_label.setText(f"📂 {base_dir}")
+        name, path = os.path.basename(os.path.normpath(base_dir)) or base_dir, base_dir
     else:
-        folder_path_label.setText("📂 No folder selected")
+        name, path = "No folder open", "File → Open Folder…, or drop files on the window"
+    folder_name_label.setText(name)
+    fm = folder_path_label.fontMetrics()
+    folder_path_label.setText(fm.elidedText(path, QtCore.Qt.TextElideMode.ElideMiddle,
+                                            max(120, sidebar_scroll.width() - 60)))
+    folder_path_label.setToolTip(path)
 
 update_folder_label()
 
@@ -1107,11 +1239,8 @@ class _ScrollFadeShadow(QtWidgets.QWidget):
 # ─────────────────────────────────────────────
 #  SECTION 1: Files & Overlays
 # ─────────────────────────────────────────────
-files_section = CollapsibleSection("Files && Overlays", collapsed=False)
-main_layout.addWidget(files_section)
-
-file_row = QtWidgets.QHBoxLayout()
-file_row.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+# The Data card: folder, main spectrum, filters and the file list
+files_section, _data_lay, _data_head = _make_card("Data", sidebar_layout, stretch=1)
 
 polarity_combo = QtWidgets.QComboBox()
 polarity_combo.addItems(["neg", "pos", "All"]); polarity_combo.setFixedWidth(60)
@@ -1139,8 +1268,9 @@ combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumCo
 combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                     QtWidgets.QSizePolicy.Policy.Fixed)
 
-refresh_btn = QtWidgets.QPushButton("↺")
-refresh_btn.setFixedWidth(26); refresh_btn.setToolTip("Refresh / reload current file (F5)")
+refresh_btn = QtWidgets.QPushButton()
+refresh_btn.setFixedSize(28, 26); refresh_btn.setToolTip("Reload the current file (F5)")
+_themed_icons.set(refresh_btn, "refresh")
 
 fmt_combo = QtWidgets.QComboBox()
 fmt_combo.addItems(["Auto-detect", "Tab", "Comma", "Semicolon", "Space"])
@@ -1170,26 +1300,74 @@ def _pick_main_color():
 
 main_color_btn.clicked.connect(_pick_main_color)
 
-file_row.addWidget(main_toggle)
-file_row.addWidget(QtWidgets.QLabel("Main file     "))
-file_row.addWidget(main_color_btn)
-file_row.addWidget(QtWidgets.QLabel(" Mode:"))
-file_row.addWidget(polarity_combo)
-
 dt_combo = QtWidgets.QComboBox()
-dt_combo.setFixedWidth(80)
 dt_combo.setToolTip("Filter files by dt value (from filename). 'All' shows all files.")
 dt_combo.addItem("All")
-file_row.addWidget(QtWidgets.QLabel("dt:"))
-file_row.addWidget(dt_combo)
 
-file_row.addWidget(combo)
-file_row.addWidget(refresh_btn)
-file_row.addSpacing(8)
-file_row.addWidget(QtWidgets.QLabel("Sep:"))
-file_row.addWidget(fmt_combo)
-file_row.addStretch()
-files_section.add_layout(file_row)
+# Header buttons: open a folder / single files
+_data_head.addWidget(_icon_button("folder", "Open a folder…  (File → Open Folder…)",
+                                  lambda: open_folder_action.trigger()))
+_data_head.addWidget(_icon_button("files", "Open individual files…",
+                                  lambda: open_files_action.trigger()))
+
+_folder_box = QtWidgets.QVBoxLayout()
+_folder_box.setSpacing(0)
+_folder_box.addWidget(folder_name_label)
+_folder_box.addWidget(folder_path_label)
+_data_lay.addLayout(_folder_box)
+
+# Main spectrum: visible + colour
+_main_row = QtWidgets.QHBoxLayout()
+_main_row.setSpacing(6)
+_main_row.addWidget(main_toggle)
+_main_row.addWidget(main_color_btn)
+_main_row.addWidget(QtWidgets.QLabel("Main spectrum"))
+_main_row.addStretch()
+_main_row.addWidget(refresh_btn)
+_data_lay.addLayout(_main_row)
+
+# Filters: mode / dt / separator, labels above the boxes
+for _w in (polarity_combo, dt_combo, fmt_combo):
+    _w.setMinimumWidth(56); _w.setMaximumWidth(16777215)
+    _w.setProperty("dense", True)
+    _w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+_filters = QtWidgets.QGridLayout()
+_filters.setHorizontalSpacing(6); _filters.setVerticalSpacing(2)
+for _col, (_txt, _w) in enumerate((("Mode", polarity_combo), ("dt", dt_combo),
+                                   ("Separator", fmt_combo))):
+    _lbl = _muted(_txt); _lbl.setStyleSheet("font-size: 8pt;")
+    _filters.addWidget(_lbl, 0, _col)
+    _filters.addWidget(_w, 1, _col)
+_filters.setColumnStretch(0, 2); _filters.setColumnStretch(1, 2); _filters.setColumnStretch(2, 3)
+_data_lay.addLayout(_filters)
+
+# The file list itself (shares the hidden combo's model)
+from droplet_pkg.ui.file_browser import FileBrowser
+file_browser = FileBrowser(combo)
+_data_lay.addWidget(file_browser, 1)
+combo.setVisible(False)
+_data_lay.addWidget(combo)
+
+_nav_row = QtWidgets.QHBoxLayout()
+_nav_row.setSpacing(4)
+_file_prev_btn = _icon_button("prev", "Previous file  (Alt+Up)", lambda: file_browser.step(-1))
+_file_next_btn = _icon_button("next", "Next file  (Alt+Down)", lambda: file_browser.step(+1))
+_file_pos_label = _muted()
+_nav_row.addWidget(_file_prev_btn)
+_nav_row.addWidget(_file_pos_label, 1, QtCore.Qt.AlignmentFlag.AlignCenter)
+_nav_row.addWidget(_file_next_btn)
+_data_lay.addLayout(_nav_row)
+
+def _update_file_pos_label(*_):
+    _file_pos_label.setText(file_browser.position_text())
+combo.currentIndexChanged.connect(_update_file_pos_label)
+combo.model().rowsInserted.connect(lambda *_: QtCore.QTimer.singleShot(0, _update_file_pos_label))
+combo.model().rowsRemoved.connect(lambda *_: QtCore.QTimer.singleShot(0, _update_file_pos_label))
+file_browser.search.textChanged.connect(_update_file_pos_label)
+
+for _seq, _d in (("Alt+Down", +1), ("Alt+Up", -1)):
+    _sc = QtGui.QShortcut(QtGui.QKeySequence(_seq), main_win)
+    _sc.activated.connect(lambda d=_d: file_browser.step(d))
 
 def _repopulate_all_overlays():
     for ov in overlay_list:
@@ -1224,12 +1402,17 @@ overlay_rows_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.Scrol
 overlay_rows_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 overlay_rows_scroll.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                                   QtWidgets.QSizePolicy.Policy.Fixed)
-files_section.add_widget(overlay_rows_scroll)
+overlays_card, _ov_lay, _ov_head = _make_card("Overlays", sidebar_layout)
+_ov_empty_label = _muted("Put more spectra on top of the main one to compare them.")
+_ov_empty_label.setWordWrap(True)
+_ov_lay.addWidget(_ov_empty_label)
+_ov_lay.addWidget(overlay_rows_scroll)
 _overlay_fade = _ScrollFadeShadow(overlay_rows_scroll)
 
-OVERLAY_LIST_MAX_WINDOW_FRAC = 0.15
+OVERLAY_LIST_MAX_WINDOW_FRAC = 0.40
 
 def _update_overlay_scroll_height():
+    _ov_empty_label.setVisible(not overlay_list)
     if not overlay_list:
         overlay_rows_scroll.setVisible(False)
         return
@@ -1267,13 +1450,18 @@ OVERLAY_COLORS = [
 ]
 
 def make_overlay_row(index=0, label=None, path=None, show_save=False):
-    row_widget = QtWidgets.QWidget()
+    # A small card: [✓ name] [colour] [mode] [dt] [×]  /  [file ▾]
+    row_widget = QtWidgets.QFrame()
+    row_widget.setObjectName("OverlayCard")
     row_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                              QtWidgets.QSizePolicy.Policy.Fixed)
+    _card_lay = QtWidgets.QVBoxLayout(row_widget)
+    _card_lay.setContentsMargins(8, 6, 6, 6)
+    _card_lay.setSpacing(4)
     row_layout = QtWidgets.QHBoxLayout()
     row_layout.setContentsMargins(0, 0, 0, 0)
-    row_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
-    row_widget.setLayout(row_layout)
+    row_layout.setSpacing(4)
+    _card_lay.addLayout(row_layout)
 
     chk_label = label if label else f"Overlay {index+1}"
     toggle  = QtWidgets.QCheckBox(chk_label); toggle.setChecked(False)
@@ -1286,7 +1474,9 @@ def make_overlay_row(index=0, label=None, path=None, show_save=False):
     ov_combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                            QtWidgets.QSizePolicy.Policy.Fixed)
 
-    remove_ov_btn = QtWidgets.QPushButton("×"); remove_ov_btn.setFixedSize(22, 22)
+    remove_ov_btn = QtWidgets.QPushButton(); remove_ov_btn.setFixedSize(22, 22)
+    remove_ov_btn.setFlat(True); remove_ov_btn.setToolTip("Remove this overlay")
+    _themed_icons.set(remove_ov_btn, "close")
 
     # Per-overlay color button
     ov_color_btn = QtWidgets.QPushButton()
@@ -1297,22 +1487,31 @@ def make_overlay_row(index=0, label=None, path=None, show_save=False):
     ov_color_btn.setToolTip("Choose colour for this overlay")
 
     ov_dt_combo = QtWidgets.QComboBox()
-    ov_dt_combo.setFixedWidth(70)
     ov_dt_combo.setToolTip("Filter overlay files by dt value. 'All' shows all.")
     ov_dt_combo.setEnabled(False)   # enabled only when overlay is toggled on
 
-    row_layout.addWidget(toggle)
+    pol.setMinimumWidth(0); pol.setMaximumWidth(16777215)
+    pol.setToolTip("Mode filter for this overlay's file list")
+    # Both filters shrink to fit the sidebar; the file box gets its own line
+    for _cb in (pol, ov_dt_combo):
+        _cb.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        _cb.setMinimumContentsLength(3)
+        _cb.setMinimumWidth(50)          # below its padded size hint, so the card fits
+        _cb.setProperty("dense", True)   # slimmer padding (see theme.py)
+    ov_combo.setMinimumWidth(0)
+    ov_combo.setMinimumContentsLength(12)
     row_layout.addWidget(ov_color_btn)
-    row_layout.addWidget(QtWidgets.QLabel(" Mode:")); row_layout.addWidget(pol)
-    row_layout.addWidget(QtWidgets.QLabel(" dt:")); row_layout.addWidget(ov_dt_combo)
-    row_layout.addWidget(QtWidgets.QLabel(" File:")); row_layout.addWidget(ov_combo)
+    row_layout.addWidget(toggle, 1)
+    row_layout.addWidget(pol)
+    row_layout.addWidget(ov_dt_combo)
     row_layout.addWidget(remove_ov_btn)
+    _card_lay.addWidget(ov_combo)
 
     save_btn = None
     if show_save:
-        save_btn = QtWidgets.QPushButton("💾 Save"); save_btn.setFixedWidth(70)
-        row_layout.addWidget(save_btn)
-    row_layout.addStretch()
+        save_btn = QtWidgets.QPushButton("Save as file…")
+        save_btn.setToolTip("Save this processed spectrum to a file")
+        _card_lay.addWidget(save_btn)
 
     ov_data = {"toggle": toggle, "polarity": pol,
                "combo": ov_combo, "dt_combo": ov_dt_combo, "df": None, "widget": row_widget,
@@ -1424,30 +1623,40 @@ def add_overlay_row(label=None, path=None, show_save=False, df_override=None):
 
 # add_overlay_row()
 
-ov_btns_row = QtWidgets.QHBoxLayout()
-add_overlay_btn = QtWidgets.QPushButton("+ Add Overlay")
-add_overlay_btn.setFixedWidth(110); add_overlay_btn.clicked.connect(lambda: add_overlay_row())
-ov_help_btn = QtWidgets.QPushButton("?"); ov_help_btn.setFixedWidth(24)
-ov_btns_row.addWidget(add_overlay_btn); ov_btns_row.addWidget(ov_help_btn); ov_btns_row.addStretch()
-files_section.add_layout(ov_btns_row)
+add_overlay_btn = QtWidgets.QPushButton(" Add overlay")
+_themed_icons.set(add_overlay_btn, "plus")
+add_overlay_btn.setToolTip("Add a spectrum to show on top of the main one")
+
+def _add_overlay_from_button():
+    """Add an overlay that is on straight away, showing the file after the
+    main one (so it differs from it), instead of an empty, disabled row."""
+    ov = add_overlay_row()
+    cb = ov["combo"]
+    i = cb.findData(combo.currentData())
+    if i >= 0 and cb.count() > 1:
+        cb.setCurrentIndex((i + 1) % cb.count())
+    if cb.currentData() is not None:
+        ov["toggle"].setChecked(True)
+
+add_overlay_btn.clicked.connect(_add_overlay_from_button)
+ov_help_btn = _icon_button("help", "How overlays work")
+_ov_head.addWidget(ov_help_btn)
+_ov_lay.addWidget(add_overlay_btn)
 
 # ─────────────────────────────────────────────
-#  SECTION 2: Tools bar
+#  SECTION 2: Display settings (sidebar) + toolbar widgets
 # ─────────────────────────────────────────────
-tools_row = QtWidgets.QHBoxLayout()
-tools_row.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
 
 # "Pick into:" - only visible when pick mode is active
 pick_into_widget = QtWidgets.QWidget()
 pick_into_layout = QtWidgets.QHBoxLayout(pick_into_widget)
-pick_into_layout.setContentsMargins(0, 0, 0, 0)
+pick_into_layout.setContentsMargins(6, 0, 6, 0)
 pick_into_layout.setSpacing(4)
 pick_into_layout.addWidget(QtWidgets.QLabel("Pick into:"))
 pick_row_combo = QtWidgets.QComboBox()
-pick_row_combo.setFixedWidth(50); pick_row_combo.setToolTip("Target peak row for click-to-pick")
+pick_row_combo.setFixedWidth(56); pick_row_combo.setToolTip("Peak row that clicked peaks are added to")
 pick_into_layout.addWidget(pick_row_combo)
 pick_into_widget.setVisible(False)   # hidden until pick mode is on
-tools_row.addWidget(pick_into_widget)
 
 class JumpSlider(QtWidgets.QSlider):
     def mousePressEvent(self, event):
@@ -1458,69 +1667,54 @@ class JumpSlider(QtWidgets.QSlider):
             self.setValue(val)
         super().mousePressEvent(event)
 
-tools_row.addSpacing(16)
-tools_row.addWidget(QtWidgets.QLabel("Highlight intensity:"))
 highlight_slider = JumpSlider(QtCore.Qt.Orientation.Horizontal)
 highlight_slider.setMinimum(10); highlight_slider.setMaximum(255)
-highlight_slider.setValue(255); highlight_slider.setFixedWidth(120)
+highlight_slider.setValue(255); 
 highlight_slider.setToolTip(
     "Highlight colour intensity.\n"
     "At 255 the peak is shown in its full chosen colour.\n"
     "Reducing blends toward white (bright) or black (dark).")
-tools_row.addWidget(highlight_slider)
-tools_row.addSpacing(16)
-tools_row.addWidget(QtWidgets.QLabel("Overlay opacity:"))
 overlay_opacity_slider = JumpSlider(QtCore.Qt.Orientation.Horizontal)
 overlay_opacity_slider.setMinimum(5); overlay_opacity_slider.setMaximum(100)
-overlay_opacity_slider.setValue(80); overlay_opacity_slider.setFixedWidth(120)
+overlay_opacity_slider.setValue(80); 
 overlay_opacity_slider.setToolTip(
     "Opacity of all overlay spectra (5–100 %).\n"
     "Lower values make overlays more transparent so the\n"
     "primary spectrum is easier to read through them.")
-tools_row.addWidget(overlay_opacity_slider)
-tools_row.addSpacing(16)
 
 stacked_logy_chk = QtWidgets.QCheckBox("Log Y")
 stacked_logy_chk.setChecked(_log_y)
 stacked_logy_chk.setToolTip("Use logarithmic Y axis")
-tools_row.addWidget(stacked_logy_chk)
 
 stacked_mode_chk = QtWidgets.QCheckBox("Stacked")
 stacked_mode_chk.setChecked(_stacked_mode)
 stacked_mode_chk.setToolTip("Show spectra stacked in rows instead of overlapping")
-tools_row.addWidget(stacked_mode_chk)
 
 stacked_dyn_scale_chk = QtWidgets.QCheckBox("Dyn Scale")
 stacked_dyn_scale_chk.setChecked(_stacked_dyn_scale)
 stacked_dyn_scale_chk.setToolTip(
     "Stacked mode: ON = each spectrum normalised to 0–1 (equal heights).\n"
     "OFF = raw intensities, Y axis shared → heights are directly comparable.")
-tools_row.addWidget(stacked_dyn_scale_chk)
 
 sigma3_clip_chk = QtWidgets.QCheckBox("σ Clip")
 sigma3_clip_chk.setChecked(_sigma3_clip)
 sigma3_clip_chk.setToolTip(
     "Sigma noise clipping: suppress baseline noise below the\n"
     "N-sigma noise floor on the main plot (independent of Dynamic Scale).")
-tools_row.addWidget(sigma3_clip_chk)
 
 sigma3_slider = JumpSlider(QtCore.Qt.Orientation.Horizontal)
 sigma3_slider.setMinimum(10)   # represents 1.0 σ
 sigma3_slider.setMaximum(40)   # represents 4.0 σ
 sigma3_slider.setValue(int(_sigma3_n_sigma * 10))
-sigma3_slider.setFixedWidth(80)
+
 sigma3_slider.setEnabled(_sigma3_clip)
 sigma3_slider.setToolTip("Noise clipping threshold (1.0 – 4.0 σ)")
 
 sigma3_sigma_label = QtWidgets.QLabel(f"{_sigma3_n_sigma:.1f}σ")
-sigma3_sigma_label.setFixedWidth(30)
+sigma3_sigma_label.setFixedWidth(34)
 sigma3_sigma_label.setEnabled(_sigma3_clip)
 
-tools_row.addWidget(sigma3_slider)
-tools_row.addWidget(sigma3_sigma_label)
 
-tools_row.addSpacing(16)
-tools_row.addWidget(QtWidgets.QLabel("View All min m/z:"))
 _view_mz_lower_spin = QtWidgets.QDoubleSpinBox()
 _view_mz_lower_spin.setRange(0.0, 10000.0)
 _view_mz_lower_spin.setDecimals(1)
@@ -1532,9 +1726,35 @@ _view_mz_lower_spin.setToolTip(
     "Prevents low-m/z noise from compressing the spectrum vertically.")
 _view_mz_lower_spin.valueChanged.connect(
     lambda v: settings.setValue("view_mz_lower", v))
-tools_row.addWidget(_view_mz_lower_spin)
-tools_row.addStretch()
-main_layout.addLayout(tools_row)
+
+# ── Display card ──
+display_card, _disp_lay, _disp_head = _make_card("Display", sidebar_layout)
+_disp_grid = QtWidgets.QGridLayout()
+_disp_grid.setHorizontalSpacing(8); _disp_grid.setVerticalSpacing(8)
+_disp_grid.addWidget(QtWidgets.QLabel("Highlight"), 0, 0)
+_disp_grid.addWidget(highlight_slider, 0, 1, 1, 2)
+_disp_grid.addWidget(QtWidgets.QLabel("Overlays"), 1, 0)
+_disp_grid.addWidget(overlay_opacity_slider, 1, 1, 1, 2)
+sigma3_clip_chk.setText("σ clip")
+_disp_grid.addWidget(sigma3_clip_chk, 2, 0)
+_disp_grid.addWidget(sigma3_slider, 2, 1)
+_disp_grid.addWidget(sigma3_sigma_label, 2, 2)
+_disp_grid.addWidget(QtWidgets.QLabel("View-all from"), 3, 0)
+_view_mz_lower_spin.setSuffix("  m/z")
+_view_mz_lower_spin.setFixedWidth(96)
+_disp_grid.addWidget(_view_mz_lower_spin, 3, 1, 1, 2, QtCore.Qt.AlignmentFlag.AlignLeft)
+_disp_grid.setColumnStretch(1, 1)
+_disp_lay.addLayout(_disp_grid)
+_disp_checks = QtWidgets.QHBoxLayout()
+_disp_checks.setSpacing(12)
+stacked_logy_chk.setText("Log Y")
+stacked_mode_chk.setText("Stacked")
+stacked_dyn_scale_chk.setText("Dynamic scale")
+for _w in (stacked_logy_chk, stacked_mode_chk, stacked_dyn_scale_chk):
+    _disp_checks.addWidget(_w)
+_disp_checks.addStretch()
+_disp_lay.addLayout(_disp_checks)
+sidebar_layout.addStretch(0)
 
 # ── Plot title bar ────────────────────────────────────────────────────────────
 # Main title + auto-parsed filename tokens
@@ -1549,7 +1769,7 @@ _tbl.setSpacing(4)
 
 _plot_title_edit = QtWidgets.QLineEdit()
 _plot_title_edit.setPlaceholderText("Plot title…")
-_plot_title_edit.setMinimumWidth(140)
+_plot_title_edit.setMinimumWidth(80)
 _plot_title_edit.setToolTip("Main title displayed above the plot.")
 _plot_title_edit.setText(settings.value("plot_title/text", ""))
 _tbl.addWidget(_plot_title_edit)
@@ -1558,13 +1778,14 @@ _sep1 = QtWidgets.QFrame(); _sep1.setFrameShape(QtWidgets.QFrame.Shape.VLine)
 _sep1.setStyleSheet("color: #ccc;"); _tbl.addWidget(_sep1)
 
 _plot_header_edits: dict[str, QtWidgets.QLineEdit] = {}
-_TITLE_KEY_WIDTHS = {"date": 88, "mode": 38, "dt": 38, "sample": 110}
+_TITLE_KEY_WIDTHS = {"date": 88, "mode": 46, "dt": 42, "sample": 110}
 for _hk in _TITLE_HEADER_KEYS:
     _hl = QtWidgets.QLabel(f"{_hk}:")
     _hl.setStyleSheet("color: gray; font-size: 10px;")
     _tbl.addWidget(_hl)
     _hed = QtWidgets.QLineEdit()
-    _hed.setFixedWidth(_TITLE_KEY_WIDTHS[_hk])
+    _hed.setMinimumWidth(min(40, _TITLE_KEY_WIDTHS[_hk]))   # shrinks in narrow windows
+    _hed.setMaximumWidth(_TITLE_KEY_WIDTHS[_hk])
     _hed.setPlaceholderText(_hk)
     _hed.setStyleSheet("font-size: 10px;")
     _hed.setToolTip(f"Auto-parsed from filename. Edit to override.")
@@ -1578,7 +1799,7 @@ _tbl.addWidget(QtWidgets.QLabel("pt:"))
 _plot_title_size = QtWidgets.QSpinBox()
 _plot_title_size.setRange(6, 28)
 _plot_title_size.setValue(settings.value("plot_title/size", 11, type=int))
-_plot_title_size.setFixedWidth(46)
+_plot_title_size.setFixedWidth(58)
 _tbl.addWidget(_plot_title_size)
 
 _clear_title_btn = QtWidgets.QPushButton()
@@ -1597,7 +1818,9 @@ _hide_title_bar_btn.setFlat(True)
 _hide_title_bar_btn.setToolTip("Hide the plot title bar\n(View → Show Plot Title Bar brings it back)")
 _tbl.addWidget(_hide_title_bar_btn)
 _title_bar.setVisible(settings.value("plot_title/show", True, type=bool))
-main_layout.addWidget(_title_bar)
+_title_bar.setObjectName("TitleBar")
+_title_bar.setMaximumHeight(34)
+_center_layout.addWidget(_title_bar)
 
 def _set_stacked_mode(val):
     global _stacked_mode
@@ -1637,8 +1860,10 @@ stacked_mode_action.toggled.connect(_set_stacked_mode)
 stacked_mode_chk.stateChanged.connect(lambda v: _set_stacked_mode(bool(v)))
 stacked_dyn_scale_chk.stateChanged.connect(lambda v: _set_stacked_dyn_scale(bool(v)))
 
-# disconnect old lambda on stacked_logy_action (it was set inline before)
-stacked_logy_action.triggered.disconnect()
+# disconnect old lambda on stacked_logy_action (it was set inline before;
+# it is connected to toggled, so disconnecting triggered left it in place and
+# every Log Y change from the menu rendered the plot twice)
+stacked_logy_action.toggled.disconnect()
 stacked_logy_action.toggled.connect(_set_log_y)
 stacked_logy_chk.stateChanged.connect(lambda v: _set_log_y(bool(v)))
 
@@ -1669,11 +1894,124 @@ sigma3_slider.valueChanged.connect(_set_sigma3_n_sigma)
 #  Plot widget
 # ─────────────────────────────────────────────
 plot_widget = pg.GraphicsLayoutWidget()
-main_layout.addWidget(plot_widget)
+_plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+_plot_splitter.setChildrenCollapsible(False)
+_plot_splitter.addWidget(plot_widget)
+_plot_splitter.setStretchFactor(0, 1)
+_center_layout.addWidget(_plot_splitter, 1)
 
 status_bar = QtWidgets.QStatusBar()
 status_bar.setSizeGripEnabled(False)
 main_layout.addWidget(status_bar)
+# Permanent readouts on the right: mouse mode, then cursor position
+_status_mode_label = QtWidgets.QLabel("Pan")
+_status_mode_label.setObjectName("StatusMode")
+_status_cursor_label = QtWidgets.QLabel("")
+_status_cursor_label.setObjectName("StatusCursor")
+_status_cursor_label.setMinimumWidth(260)
+_status_cursor_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                  | QtCore.Qt.AlignmentFlag.AlignVCenter)
+status_bar.addPermanentWidget(_status_cursor_label)
+status_bar.addPermanentWidget(_status_mode_label)
+
+# ── Main toolbar ──────────────────────────────────────────────────────────────
+# The same QActions as the menus, so state (checked, enabled) stays in sync
+# both ways, and the menus get the icons too.
+def _tb(action, icon_name, tip):
+    _themed_icons.set(action, icon_name)
+    action.setToolTip(tip)
+    main_toolbar.addAction(action)
+    return action
+
+def _tb_text_button(action_or_menu, icon_name, text, tip):
+    """A toolbar button with a label beside its icon (for the main tools)."""
+    btn = QtWidgets.QToolButton()
+    btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    btn.setIconSize(QtCore.QSize(18, 18))
+    if isinstance(action_or_menu, QtWidgets.QMenu):
+        btn.setMenu(action_or_menu)
+        btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        _themed_icons.set(btn, icon_name)
+    else:
+        btn.setDefaultAction(action_or_menu)
+        _themed_icons.set(action_or_menu, icon_name)
+    if isinstance(action_or_menu, QtWidgets.QMenu):
+        btn.setText(text)
+    btn.setToolTip(tip)
+    main_toolbar.addWidget(btn)
+    return btn
+
+_tb(open_folder_action, "folder", "Open a folder of spectra  (Ctrl+O)")
+_tb(open_files_action,  "files",  "Open individual files")
+_tb(refresh_action,     "refresh", "Reload the current file  (F5)")
+main_toolbar.addSeparator()
+_tb(pan_mode_action,  "pan",      "Pan: drag to move, scroll to zoom")
+_tb(zoom_mode_action, "zoom_box", "Zoom box: drag a rectangle to zoom  (Z)")
+_tb(pick_mode_action, "pick",     "Pick peaks: click a peak to add it to a peak row  (P)")
+# Wrapped so apply_mouse_mode() can keep showing/hiding pick_into_widget itself
+# (a widget placed straight into a toolbar ignores setVisible).
+_pick_into_holder = QtWidgets.QWidget()
+_pick_into_holder_lay = QtWidgets.QHBoxLayout(_pick_into_holder)
+_pick_into_holder_lay.setContentsMargins(0, 0, 0, 0)
+_pick_into_holder_lay.addWidget(pick_into_widget)
+main_toolbar.addWidget(_pick_into_holder)
+main_toolbar.addSeparator()
+_tb(stacked_logy_action, "log",       "Logarithmic Y axis")
+_tb(stacked_mode_action, "stacked",   "Stacked: one row per spectrum")
+_tb(sigma3_clip_action,  "sigma",     "σ clip: hide baseline noise on screen (level in the sidebar)")
+_tb(grid_action,         "grid",      "Grid lines")
+_tb(crosshair_action,    "crosshair", "Cross-lines following the cursor")
+main_toolbar.addSeparator()
+peaks_action.setIconText("Peaks")      # the toolbar button's label
+peaks_toolbar_btn = _tb_text_button(peaks_action, "peaks", "Peaks", "Peak lists  (Ctrl+P)")
+_tb(legend_params_action,  "legend",   "Legend parameters…")
+_tb(ratio_mode_action,     "ratio",    "Peak intensity ratio  (R)")
+_tb(area_action,           "area",     "Peak list area tools…")
+_tb(cluster_detect_action, "clusters", "Cluster detection…")
+main_toolbar.addSeparator()
+_export_menu = QtWidgets.QMenu(main_win)
+for _a in (export_png_action, export_svg_action, export_pdf_action, export_pgf_action):
+    _export_menu.addAction(_a)
+_export_menu.addSeparator()
+_export_menu.addAction(batch_export_plots_action)
+_export_menu.addSeparator()
+_export_menu.addAction(print_action)
+_tb_text_button(_export_menu, "export", "Export", "Export the plot as PNG, SVG, PDF or PGF")
+_tb(copy_plot_action, "copy", "Copy the plot to the clipboard  (Ctrl+Shift+C)")
+
+_tb_spacer = QtWidgets.QWidget()
+_tb_spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                         QtWidgets.QSizePolicy.Policy.Preferred)
+main_toolbar.addWidget(_tb_spacer)
+
+theme_toggle_action = QtWidgets.QAction("Dark / bright", main_win)
+theme_toggle_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+D"))
+theme_toggle_action.triggered.connect(
+    lambda: (bright_action if current_display == "dark" else dark_action).trigger())
+main_toolbar.addAction(theme_toggle_action)
+
+def _update_theme_toggle_icon():
+    dark = _theme.current_mode() == "dark"
+    theme_toggle_action.setIcon(_icon("sun" if dark else "moon"))
+    theme_toggle_action.setToolTip(
+        ("Switch to bright mode" if dark else "Switch to dark mode") + "  (Ctrl+Shift+D)")
+_theme.on_theme_changed(lambda _t: _update_theme_toggle_icon())
+_update_theme_toggle_icon()
+
+sidebar_action = QtWidgets.QAction("Show Sidebar", main_win, checkable=True)
+sidebar_action.setShortcut(QtGui.QKeySequence("Ctrl+B"))
+sidebar_action.setChecked(settings.value("sidebar_visible", True, type=bool))
+_tb(sidebar_action, "sidebar", "Show / hide the sidebar  (Ctrl+B)")
+sidebar_scroll.setVisible(sidebar_action.isChecked())
+sidebar_action.toggled.connect(lambda v: (sidebar_scroll.setVisible(v),
+                                          settings.setValue("sidebar_visible", v)))
+view_menu.insertAction(view_menu.actions()[0], sidebar_action)
+view_menu.insertSeparator(view_menu.actions()[1])
+
+# Leave room on the right for Dropli, who sits in the window's top-right corner
+_tb_dropli_gap = QtWidgets.QWidget()
+_tb_dropli_gap.setFixedWidth(58)
+main_toolbar.addWidget(_tb_dropli_gap)
 
 plot = plot_widget.addPlot()
 plot.setLabel('bottom', 'm/z')
@@ -1961,23 +2299,22 @@ class _MinimapOverlay(QtWidgets.QWidget):
         pw, ph = float(self._W), float(self._H)
         mid_y  = ph / 2.0
 
-        # Thin grey baseline
-        painter.setPen(QtGui.QPen(QtGui.QColor(160, 160, 160, 180), 1))
-        painter.drawLine(QtCore.QPointF(0, mid_y), QtCore.QPointF(pw, mid_y))
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        accent = QtGui.QColor(_theme.tokens()["accent"])
+        # Track: the whole spectrum
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor(150, 150, 150, 70))
+        painter.drawRoundedRect(QtCore.QRectF(0, mid_y - 2, pw, 4), 2, 2)
 
         if self._view_rect is not None:
             rx0 = (self._view_rect.left()  - x_min) / (x_max - x_min) * pw
             rx1 = (self._view_rect.right() - x_min) / (x_max - x_min) * pw
             rx0 = max(0.0, min(rx0, pw))
             rx1 = max(0.0, min(rx1, pw))
-            # Filled zone on the baseline showing the current viewport span
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.setBrush(QtGui.QColor(255, 80, 80, 180))
-            painter.drawRect(QtCore.QRectF(rx0, mid_y - 3, rx1 - rx0, 6))
-            # Thin tick marks at the edges
-            painter.setPen(QtGui.QPen(QtGui.QColor(255, 80, 80, 230), 1))
-            painter.drawLine(QtCore.QPointF(rx0, 0), QtCore.QPointF(rx0, ph))
-            painter.drawLine(QtCore.QPointF(rx1, 0), QtCore.QPointF(rx1, ph))
+            # Thumb: the part of the spectrum currently in view
+            accent.setAlpha(200)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(QtCore.QRectF(rx0, mid_y - 3, max(rx1 - rx0, 4), 6), 3, 3)
 
         painter.end()
 
@@ -9805,6 +10142,8 @@ class PeakRowsContainer(QtWidgets.QWidget):
                 if row.get("group_name", "Unclassified") not in known:
                     row["widget"].show()
                     self._layout.addWidget(row["widget"])
+            # Keep rows at their natural height at the top of a tall window
+            self._layout.addStretch(1)
         finally:
             self.setUpdatesEnabled(True)
 
@@ -10937,9 +11276,9 @@ def _update_peak_nav_buttons():
 
 pw_toolbar = QtWidgets.QHBoxLayout()
 
-pw_prev_file_btn = QtWidgets.QPushButton("◀"); pw_prev_file_btn.setFixedWidth(26)
+pw_prev_file_btn = QtWidgets.QPushButton(); pw_prev_file_btn.setFixedWidth(28); _themed_icons.set(pw_prev_file_btn, "prev")
 pw_prev_file_btn.setToolTip("Previous peak list file"); pw_prev_file_btn.setEnabled(False)
-pw_next_file_btn = QtWidgets.QPushButton("▶"); pw_next_file_btn.setFixedWidth(26)
+pw_next_file_btn = QtWidgets.QPushButton(); pw_next_file_btn.setFixedWidth(28); _themed_icons.set(pw_next_file_btn, "next")
 pw_next_file_btn.setToolTip("Next peak list file"); pw_next_file_btn.setEnabled(False)
 
 def _pw_go_prev():
@@ -10961,15 +11300,15 @@ def _pw_go_next():
 pw_prev_file_btn.clicked.connect(_pw_go_prev)
 pw_next_file_btn.clicked.connect(_pw_go_next)
 
-undo_btn = QtWidgets.QPushButton("↩ Undo"); undo_btn.setFixedWidth(70)
+undo_btn = QtWidgets.QPushButton("↩ Undo")
 undo_btn.setToolTip("Undo last peak text edit  (Ctrl+Z)")
 undo_btn.setEnabled(False)
 
-redo_btn = QtWidgets.QPushButton("↪ Redo"); redo_btn.setFixedWidth(70)
+redo_btn = QtWidgets.QPushButton("↪ Redo")
 redo_btn.setToolTip("Redo  (Ctrl+Y / Ctrl+Shift+Z)")
 redo_btn.setEnabled(False)
 
-add_btn = QtWidgets.QPushButton("+ Add row"); add_btn.setFixedWidth(80)
+add_btn = QtWidgets.QPushButton("+ Add row")
 add_btn.clicked.connect(lambda: add_peak_row())
 
 def _add_row_relative(above: bool):
@@ -10993,11 +11332,11 @@ def _add_row_relative(above: bool):
         new_row["peaks_input"].setFocus(),
         peaks_rows_scroll.ensureWidgetVisible(new_row["widget"])))
 
-add_above_btn = QtWidgets.QPushButton("↑ Above"); add_above_btn.setFixedWidth(68)
+add_above_btn = QtWidgets.QPushButton("↑ Above")
 add_above_btn.setToolTip("Insert a blank row above the selected row(s)")
 add_above_btn.clicked.connect(lambda: _add_row_relative(above=True))
 
-add_below_btn = QtWidgets.QPushButton("↓ Below"); add_below_btn.setFixedWidth(68)
+add_below_btn = QtWidgets.QPushButton("↓ Below")
 add_below_btn.setToolTip("Insert a blank row below the selected row(s)")
 add_below_btn.clicked.connect(lambda: _add_row_relative(above=False))
 
@@ -11072,11 +11411,11 @@ def _duplicate_row():
         last_new["peaks_input"].setFocus(),
         peaks_rows_scroll.ensureWidgetVisible(last_new["widget"])))
 
-dup_btn = QtWidgets.QPushButton("⧉ Dup"); dup_btn.setFixedWidth(60)
+dup_btn = QtWidgets.QPushButton("⧉ Dup")
 dup_btn.setToolTip("Duplicate the selected row(s) and insert them below the last selected line")
 dup_btn.clicked.connect(_duplicate_row)
 
-add_group_btn = QtWidgets.QPushButton("+ Group"); add_group_btn.setFixedWidth(68)
+add_group_btn = QtWidgets.QPushButton("+ Group")
 add_group_btn.setToolTip("Add a new peak-list group")
 
 def _add_peak_group():
@@ -11090,10 +11429,10 @@ def _add_peak_group():
     peaks_rows_container.rebuild_group_layout()
 
 add_group_btn.clicked.connect(_add_peak_group)
-peaks_help_btn = QtWidgets.QPushButton("?"); peaks_help_btn.setFixedWidth(24)
+peaks_help_btn = QtWidgets.QPushButton(); peaks_help_btn.setFixedWidth(28); _themed_icons.set(peaks_help_btn, "help")
 
-pw_select_all_btn  = QtWidgets.QPushButton("☑ All");  pw_select_all_btn.setFixedWidth(50)
-pw_select_none_btn = QtWidgets.QPushButton("☐ None"); pw_select_none_btn.setFixedWidth(54)
+pw_select_all_btn  = QtWidgets.QPushButton("Check all")
+pw_select_none_btn = QtWidgets.QPushButton("Uncheck all")
 pw_select_all_btn.setToolTip("Check all peak rows")
 pw_select_none_btn.setToolTip("Uncheck all peak rows")
 
@@ -11113,13 +11452,11 @@ pw_toolbar.addSpacing(6)
 pw_toolbar.addWidget(undo_btn); pw_toolbar.addWidget(redo_btn)
 pw_toolbar.addSpacing(8); pw_toolbar.addWidget(add_btn); pw_toolbar.addWidget(add_above_btn); pw_toolbar.addWidget(add_below_btn); pw_toolbar.addWidget(dup_btn); pw_toolbar.addWidget(add_group_btn)
 pw_toolbar.addSpacing(6)
-pw_toolbar.addWidget(pw_select_all_btn); pw_toolbar.addWidget(pw_select_none_btn)
-pw_toolbar.addSpacing(8)
 
 pw_solo_edit_btn = QtWidgets.QPushButton("Show edited only")
 pw_solo_edit_btn.setCheckable(True)
 pw_solo_edit_btn.setChecked(False)
-pw_solo_edit_btn.setFixedHeight(24)
+
 pw_solo_edit_btn.setToolTip(
     "When active: clicking a peak row's text field temporarily hides all\n"
     "other peak lists and their envelopes on the plot.\n"
@@ -11151,13 +11488,13 @@ def _on_global_focus_changed(_old, new):
 app.focusChanged.connect(_on_global_focus_changed)
 
 pw_export_csv_btn = QtWidgets.QPushButton("Export CSV")
-pw_export_csv_btn.setFixedHeight(24)
+
 pw_export_csv_btn.setToolTip("Export highlighted peak data as CSV")
 pw_export_csv_btn.clicked.connect(lambda: export_peaks_csv())
 pw_toolbar.addStretch()
 pw_toolbar.addWidget(pw_export_csv_btn)
 pw_toolbar.addWidget(peaks_help_btn)
-peaks_layout.addLayout(pw_toolbar)
+peaks_layout.insertLayout(0, pw_toolbar)
 
 # ─────────────────────────────────────────────
 #  Row copy / paste / aggregate  (toolbar 2)
@@ -11665,10 +12002,10 @@ def _open_peak_list_check():
     _peak_check_win[0].raise_()
 
 
-pw_copy_btn      = QtWidgets.QPushButton("⎘ Copy rows");  pw_copy_btn.setFixedHeight(24)
-pw_paste_btn     = QtWidgets.QPushButton("⎘ Paste rows"); pw_paste_btn.setFixedHeight(24); pw_paste_btn.setEnabled(False)
-pw_aggregate_btn = QtWidgets.QPushButton("⊕ Aggregate");  pw_aggregate_btn.setFixedHeight(24)
-pw_peak_check_btn = QtWidgets.QPushButton("⊛ Peak list check"); pw_peak_check_btn.setFixedHeight(24)
+pw_copy_btn      = QtWidgets.QPushButton("⎘ Copy rows")
+pw_paste_btn     = QtWidgets.QPushButton("⎘ Paste rows"); pw_paste_btn.setEnabled(False)
+pw_aggregate_btn = QtWidgets.QPushButton("⊕ Aggregate")
+pw_peak_check_btn = QtWidgets.QPushButton("⊛ Peak list check")
 pw_copy_btn.setToolTip("Copy selected peak rows to the internal clipboard")
 pw_paste_btn.setToolTip("Paste copied rows after the last selected row")
 pw_aggregate_btn.setToolTip(
@@ -11691,8 +12028,11 @@ pw_toolbar2.addSpacing(8)
 pw_toolbar2.addWidget(pw_aggregate_btn)
 pw_toolbar2.addSpacing(8)
 pw_toolbar2.addWidget(pw_peak_check_btn)
+pw_toolbar2.addSpacing(8)
+pw_toolbar2.addWidget(pw_select_all_btn)
+pw_toolbar2.addWidget(pw_select_none_btn)
 pw_toolbar2.addStretch()
-peaks_layout.addLayout(pw_toolbar2)
+peaks_layout.insertLayout(1, pw_toolbar2)
 
 # "Pick into:" row inside peaks window - mirrors the one in main tools bar
 pw_pick_into_widget = QtWidgets.QWidget()
@@ -11705,35 +12045,10 @@ pw_pick_row_label.setStyleSheet("font-style: italic; color: gray;")
 pw_pick_into_layout.addWidget(pw_pick_row_label)
 pw_pick_into_layout.addStretch()
 pw_pick_into_widget.setVisible(False)
-peaks_layout.addWidget(pw_pick_into_widget)
+peaks_layout.insertWidget(2, pw_pick_into_widget)
 
-# ── Label/mass toggles + font/angle ──────────────────────────────────────
-pk_toggle_row1 = QtWidgets.QHBoxLayout()
-pk_toggle_row1.addWidget(peak_labels_toggle)
-pk_toggle_row1.addWidget(peak_masses_toggle)
-pk_toggle_row1.addSpacing(10)
-
-_lbl_font_lbl = QtWidgets.QLabel("Font:")
-_lbl_font_lbl.setStyleSheet("color: gray;")
-pk_toggle_row1.addWidget(_lbl_font_lbl)
-pk_toggle_row1.addWidget(label_font_spin)
-pk_toggle_row1.addSpacing(6)
-
-_lbl_angle_lbl = QtWidgets.QLabel("Angle:")
-_lbl_angle_lbl.setStyleSheet("color: gray;")
-pk_toggle_row1.addWidget(_lbl_angle_lbl)
-pk_toggle_row1.addWidget(label_angle_spin)
-pk_toggle_row1.addSpacing(6)
-
-_lbl_alt_lbl = QtWidgets.QLabel("Height:")
-_lbl_alt_lbl.setStyleSheet("color: gray;")
-_lbl_alt_lbl.setToolTip("Extra vertical offset above peak tip for labels.")
-pk_toggle_row1.addWidget(_lbl_alt_lbl)
-pk_toggle_row1.addWidget(label_altitude_spin)
-pk_toggle_row1.addStretch()
-
+# ── Label/mass toggles + font/angle: an options card under the list ──────
 reset_L_btn = QtWidgets.QPushButton("Reset L/1L")
-reset_L_btn.setFixedHeight(22)
 reset_L_btn.setToolTip("Set all L and 1L buttons back to off (state 0) for every peak row.")
 
 def _reset_all_L_states():
@@ -11745,40 +12060,52 @@ def _reset_all_L_states():
     render_plot()
 
 reset_L_btn.clicked.connect(_reset_all_L_states)
-pk_toggle_row1.addWidget(reset_L_btn)
-peaks_layout.addLayout(pk_toggle_row1)
 
-line = QtWidgets.QFrame()
-line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+pw_options_card = QtWidgets.QFrame()
+pw_options_card.setObjectName("Card")
+_pwo = QtWidgets.QGridLayout(pw_options_card)
+_pwo.setContentsMargins(12, 8, 12, 8)
+_pwo.setHorizontalSpacing(10); _pwo.setVerticalSpacing(6)
 
-peaks_layout.addWidget(line)
+def _pwo_title(text):
+    t = QtWidgets.QLabel(text.upper()); t.setObjectName("CardTitle"); return t
 
-pk_toggle_row2 = QtWidgets.QHBoxLayout()
-pk_toggle_row2.addWidget(auto_peaks_toggle)
-pk_toggle_row2.addSpacing(8)
-pk_toggle_row2.addWidget(mass_threshold_label)
-pk_toggle_row2.addWidget(mass_threshold_spin)
-pk_toggle_row2.addWidget(threshold_mode_combo)
+def _pwo_pair(text, w):
+    box = QtWidgets.QHBoxLayout(); box.setSpacing(4)
+    l = _muted(text); box.addWidget(l); box.addWidget(w)
+    return box, l
 
+_pwo.addWidget(_pwo_title("Labels"), 0, 0)
+_pwo.addWidget(peak_labels_toggle, 0, 1)
+_pwo.addWidget(peak_masses_toggle, 0, 2)
+_pwo.addWidget(show_integers_toggle, 0, 3)
+_lbl_row = QtWidgets.QHBoxLayout(); _lbl_row.setSpacing(10)
+_b, _lbl_font_lbl = _pwo_pair("Font", label_font_spin);  _lbl_row.addLayout(_b)
+_b, _lbl_angle_lbl = _pwo_pair("Angle", label_angle_spin); _lbl_row.addLayout(_b)
+_b, _lbl_alt_lbl = _pwo_pair("Height", label_altitude_spin); _lbl_row.addLayout(_b)
+_lbl_alt_lbl.setToolTip("Extra vertical offset above peak tip for labels.")
+_lbl_row.addStretch()
+_lbl_row.addWidget(reset_L_btn)
+_pwo.addLayout(_lbl_row, 0, 4)
 
-#toggle_row2.addStretch()
-peaks_layout.addLayout(pk_toggle_row2)
-
-pk_toggle_row3 = QtWidgets.QHBoxLayout()
-pk_toggle_row3.addWidget(peak_masses_all_toggle)
-pk_toggle_row3.addStretch()
-peaks_layout.addLayout(pk_toggle_row3)
-
-line2 = QtWidgets.QFrame()
-line2.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-line2.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
-peaks_layout.addWidget(line2)
-
-pk_toggle_row4 = QtWidgets.QHBoxLayout()
-pk_toggle_row4.addWidget(show_integers_toggle)
-pk_toggle_row4.addStretch()
-peaks_layout.addLayout(pk_toggle_row4)
+_pwo.addWidget(_pwo_title("Auto peaks"), 1, 0)
+_pwo.addWidget(auto_peaks_toggle, 1, 1)
+_pwo.addWidget(peak_masses_all_toggle, 1, 2, 1, 2)
+_thr_row = QtWidgets.QHBoxLayout(); _thr_row.setSpacing(4)
+mass_threshold_label.setProperty("role", "muted")
+mass_threshold_label.setText("Threshold")
+_thr_row.addWidget(mass_threshold_label)
+mass_threshold_spin.setFixedWidth(80)
+_thr_row.addWidget(mass_threshold_spin)
+_thr_row.addWidget(threshold_mode_combo)
+_thr_row.addStretch()
+_pwo.addLayout(_thr_row, 1, 4)
+_pwo.setColumnStretch(4, 1)
+peaks_layout.addWidget(pw_options_card)
+peaks_layout.setStretchFactor(peaks_rows_scroll, 1)
+peaks_layout.setContentsMargins(10, 8, 10, 10)
+peaks_layout.setSpacing(6)
+peaks_rows_scroll.setMinimumHeight(220)
 
 # ─────────────────────────────────────────────
 #  Peak list search bar  (Ctrl+F)
@@ -11830,7 +12157,7 @@ _sb_lay.addWidget(_sb_count_lbl)
 _sb_lay.addStretch()
 
 pw_search_bar.setVisible(False)
-peaks_layout.addWidget(pw_search_bar)
+peaks_layout.insertWidget(peaks_layout.indexOf(peaks_rows_scroll), pw_search_bar)
 
 # ── Highlight colours ─────────────────────────────────────────────────────────
 _SB_HL_ALL = "background-color: rgba(255, 210,  50, 100);"  # dim yellow – all matches
@@ -12337,6 +12664,8 @@ def set_display_mode(mode):
     global current_display
     current_display = mode
     settings.setValue("display_mode", mode)
+    if _theme.current_mode() != ("dark" if mode == "dark" else "bright"):
+        _theme.apply_theme(app, mode)      # the whole interface, not only the plot
     if mode == "dark":
         plot_widget.setBackground('k')
         for ax in ('bottom', 'left'):
@@ -12371,6 +12700,21 @@ def apply_mouse_mode():
         pw_pick_mode_action.blockSignals(True)
         pw_pick_mode_action.setChecked(picking)
         pw_pick_mode_action.blockSignals(False)
+    _update_status_mode()
+
+def _update_status_mode():
+    if pick_mode_action.isChecked():
+        txt = f"Picking peaks → row {pick_row_combo.currentText() or '–'}"
+    elif zoom_mode_action.isChecked():
+        txt = "Zoom box"
+    else:
+        txt = "Pan"
+    if area_mode_action.isChecked():
+        txt += "  ·  Area"
+    _status_mode_label.setText(txt)
+
+pick_row_combo.currentIndexChanged.connect(lambda _i: _update_status_mode())
+area_mode_action.toggled.connect(lambda _v: _update_status_mode())
 
 pan_mode_action.triggered.connect(apply_mouse_mode)
 zoom_mode_action.triggered.connect(apply_mouse_mode)
@@ -12475,9 +12819,14 @@ def mouse_moved(pos):
             if mz_min - 0.5 <= x <= mz_max + 0.5:
                 current_label = peak_label; break
         _cif_pt = int(settings.value("cursor_info_font_pt", 9))
-        hover_label.setText(
-            f"<span style='font-size:{_cif_pt}pt'>m/z={x:.4f}  I={y:.4f}" +
-            (f"<br>{current_label}" if current_label else "") + "</span>")
+        if plot_readout_action.isChecked():
+            hover_label.setText(
+                f"<span style='font-size:{_cif_pt}pt'>m/z={x:.4f}  I={y:.4f}" +
+                (f"<br>{current_label}" if current_label else "") + "</span>")
+        _y_true = 10 ** y if _log_y and y < 300 else y
+        _status_cursor_label.setText(
+            (f"{current_label}   " if current_label else "") +
+            f"m/z {x:10.4f}    I {_y_true:.4g}")
 
         # ── Floating m/z label near cursor ────────────────────────────
         if mz_cursor_action.isChecked():
@@ -12502,6 +12851,7 @@ def mouse_moved(pos):
     else:
         # Mouse left the plot area - hide the cursor label
         _mz_cursor_label.setVisible(False)
+        _status_cursor_label.setText("")
 
 plot.scene().sigMouseMoved.connect(mouse_moved)
 def _toggle_crosshair(checked):
@@ -14701,7 +15051,6 @@ def _guard_polarity_change():
 
 polarity_combo.currentIndexChanged.connect(lambda _: _guard_polarity_change())
 dt_combo.currentIndexChanged.connect(lambda _: _on_filter_changed())
-peaks_action.triggered.connect(open_peaks_window)
 import_action.triggered.connect(import_peak_list)
 export_action.triggered.connect(export_peak_list)
 save_pl_action.triggered.connect(save_peak_list)
@@ -15130,6 +15479,113 @@ if combo.count() == 0:
     else:
         _populate_main_combo([])  # shows "No file in X mode" placeholder
         df = df_raw = None
+
+# ─────────────────────────────────────────────
+#  Peaks panel: own window, or docked under the plot
+# ─────────────────────────────────────────────
+# Docked, the peaks list lives in the main window below the plot (the splitter
+# between them sets the split). Its window-wide shortcuts would then clash
+# with the main window's: the undo/redo ones do the same thing in both, so the
+# peaks copies are switched off; "save peak list" moves from Ctrl+S (save
+# project) to Ctrl+Alt+S while docked.
+_peaks_dock = QtWidgets.QFrame()
+_peaks_dock.setObjectName("Card")
+_peaks_dock_lay = QtWidgets.QVBoxLayout(_peaks_dock)
+_peaks_dock_lay.setContentsMargins(0, 4, 0, 0)
+_peaks_dock_lay.setSpacing(0)
+_pd_head = QtWidgets.QHBoxLayout()
+_pd_head.setContentsMargins(12, 0, 6, 0)
+_pd_title = QtWidgets.QLabel("PEAKS")
+_pd_title.setObjectName("CardTitle")
+_pd_head.addWidget(_pd_title)
+_pd_head.addStretch()
+_pd_undock_btn = _icon_button("dock", "Move the peaks list to its own window",
+                              lambda: peaks_dock_action.setChecked(False))
+_pd_close_btn = _icon_button("close", "Hide the peaks list  (Ctrl+P shows it again)",
+                             lambda: peaks_win.hide())
+_pd_head.addWidget(_pd_undock_btn)
+_pd_head.addWidget(_pd_close_btn)
+_peaks_dock_lay.addLayout(_pd_head)
+# In a scroll area, so the panel's wide toolbars never force the main window
+# to grow: if there is not enough room, it scrolls sideways instead.
+_pd_scroll = QtWidgets.QScrollArea()
+_pd_scroll.setWidgetResizable(True)
+_pd_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+_peaks_dock_lay.addWidget(_pd_scroll, 1)
+_peaks_dock.setVisible(False)
+_plot_splitter.addWidget(_peaks_dock)
+_plot_splitter.setStretchFactor(1, 0)
+
+peaks_win.windowTitleChanged.connect(
+    lambda t: _pd_title.setText(t.replace("Peaks", "PEAKS", 1)))
+
+
+_peaks_docked = [False]   # plain flag: still readable while Qt tears windows down
+
+class _PeaksDockFollower(QtCore.QObject):
+    """While docked, the dock frame shows and hides with the peaks panel."""
+    def eventFilter(self, obj, event):
+        if _peaks_docked[0] and event.type() in (
+                QtCore.QEvent.Type.ShowToParent, QtCore.QEvent.Type.HideToParent):
+            _peaks_dock.setVisible(event.type() == QtCore.QEvent.Type.ShowToParent)
+        return False
+
+_peaks_dock_follower = _PeaksDockFollower()
+peaks_win.installEventFilter(_peaks_dock_follower)
+
+
+def _set_peaks_docked(docked):
+    settings.setValue("peaks_docked", docked)
+    _peaks_docked[0] = docked
+    was_open = peaks_win.isVisible() or not peaks_win.isHidden()
+    if docked:
+        _pd_scroll.setWidget(peaks_win)               # reparents: no longer a window
+        peaks_rows_scroll.setMinimumHeight(110)
+        save_pl_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+S"))
+        for sc in (undo_sc_pw, redo_sc_pw1, redo_sc_pw2):
+            sc.setEnabled(False)
+        h = _plot_splitter.height()
+        _plot_splitter.setSizes([int(h * 0.58), int(h * 0.42)])
+    else:
+        _pd_scroll.takeWidget()
+        _peaks_dock.setVisible(False)
+        peaks_win.setParent(None)
+        peaks_rows_scroll.setMinimumHeight(220)
+        peaks_win.setWindowFlags(QtCore.Qt.WindowType.Window)
+        save_pl_action.setShortcut(QtGui.QKeySequence("Ctrl+S"))
+        for sc in (undo_sc_pw, redo_sc_pw1, redo_sc_pw2):
+            sc.setEnabled(True)
+        peaks_win.resize(max(peaks_win.sizeHint().width(), 1060), 640)
+    if was_open:
+        peaks_win.show()
+        if docked:
+            _peaks_dock.setVisible(True)
+    else:
+        peaks_win.hide()
+
+
+def _toggle_or_open_peaks():
+    """Ctrl+P / the Peaks button: open the peaks list; when it is docked and
+    already showing, hide it instead, so the plot gets the room back."""
+    if _peaks_docked[0] and peaks_win.isVisible():
+        peaks_win.hide()
+    else:
+        open_peaks_window()
+
+
+peaks_dock_action = QtWidgets.QAction("Dock Peaks List Under the Plot", main_win, checkable=True)
+peaks_dock_action.setToolTip("Show the peaks list inside the main window, below the plot,\n"
+                             "instead of in a separate window.")
+_themed_icons.set(peaks_dock_action, "dock")
+peaks_menu.insertAction(peaks_menu.actions()[1], peaks_dock_action)
+pw_file_menu.addSeparator()
+pw_file_menu.addAction(peaks_dock_action)
+main_toolbar.insertAction(legend_params_action, peaks_dock_action)
+peaks_dock_action.setChecked(settings.value("peaks_docked", False, type=bool))
+if peaks_dock_action.isChecked():
+    peaks_win.hide()
+    _set_peaks_docked(True)
+peaks_dock_action.toggled.connect(_set_peaks_docked)
 
 main_win.setWindowTitle(f"Droplet  {APP_VERSION}")
 main_win.resize(1400, 780)
