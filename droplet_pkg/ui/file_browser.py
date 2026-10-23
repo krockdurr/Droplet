@@ -25,13 +25,18 @@ from droplet_pkg.ui.icons import themed as _themed_icons
 _DATE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})[-_]?(\d{2})(\d{2})(\d{2})?[-_]?')
 _POL_RE  = re.compile(r'_(pos|neg)(?=_|$)', re.IGNORECASE)
 _DT_RE   = re.compile(r'_dt(\d+)', re.IGNORECASE)
+_DATA_EXTENSIONS = (".txt", ".csv", ".tsv", ".dat", ".asc", ".json")
 _TAG_WORDS = ("baseline", "recalibrated", "recal", "normalized", "normalised",
               "corr", "tof", "mass", "processed", "subtracted")
 
 
 def describe(name):
     """Split a file name into (title, polarity, dt, date, tags)."""
-    stem = os.path.splitext(name)[0]
+    # Only a real extension is dropped: names hold dots ("FL5.40J"), and
+    # splitext() would cut a name given without extension there.
+    stem, ext = os.path.splitext(name)
+    if ext.lower() not in _DATA_EXTENSIONS:
+        stem = name
     date = ""
     m = _DATE_RE.match(stem)
     if m:
@@ -60,14 +65,39 @@ def describe(name):
     return title, pol, dt, date, tags
 
 
+# Optional item data understood by the delegate (used by the residuals viewer):
+HEADER_ROLE = QtCore.Qt.ItemDataRole.UserRole + 10   # True: a section title row
+BADGE_ROLE  = QtCore.Qt.ItemDataRole.UserRole + 11   # short text on the right of line 1
+BADGE_COLOR_ROLE = QtCore.Qt.ItemDataRole.UserRole + 12   # its colour (hex), else muted
+
+
 class _FileDelegate(QtWidgets.QStyledItemDelegate):
     ROW_H = 42
+    HEADER_H = 26
 
     def sizeHint(self, option, index):
-        return QtCore.QSize(option.rect.width(), self.ROW_H)
+        h = self.HEADER_H if index.data(HEADER_ROLE) else self.ROW_H
+        return QtCore.QSize(option.rect.width(), h)
+
+    def _paint_header(self, painter, option, index, t):
+        painter.save()
+        f = QtGui.QFont(option.font)
+        f.setPointSizeF(max(6.5, f.pointSizeF() - 2)); f.setBold(True)
+        f.setLetterSpacing(QtGui.QFont.SpacingType.AbsoluteSpacing, 0.8)
+        painter.setFont(f)
+        painter.setPen(QtGui.QColor(t["muted"]))
+        r = option.rect.adjusted(10, 6, -6, 0)
+        text = (index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "").upper()
+        painter.drawText(r, QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                         QtGui.QFontMetrics(f).elidedText(text, QtCore.Qt.TextElideMode.ElideRight,
+                                                          r.width()))
+        painter.restore()
 
     def paint(self, painter, option, index):
         t = theme.tokens()
+        if index.data(HEADER_ROLE):
+            self._paint_header(painter, option, index, t)
+            return
         name = index.data(QtCore.Qt.ItemDataRole.DisplayRole) or ""
         path = index.data(QtCore.Qt.ItemDataRole.UserRole)
         r = option.rect.adjusted(2, 1, -2, -1)
@@ -99,12 +129,24 @@ class _FileDelegate(QtWidgets.QStyledItemDelegate):
         w = r.width() - 16
 
         f1 = QtGui.QFont(font); f1.setWeight(QtGui.QFont.Weight.DemiBold)
+        fm1 = QtGui.QFontMetrics(f1)
+        badge = index.data(BADGE_ROLE)
+        title_w = w
+        if badge:                                 # e.g. "RMS 0.0156", right of the title
+            fb = QtGui.QFont(font); fb.setPointSizeF(max(6.5, font.pointSizeF() - 1.5))
+            fmb = QtGui.QFontMetrics(fb)
+            bw = fmb.horizontalAdvance(badge) + 4
+            painter.setFont(fb)
+            painter.setPen(QtGui.QColor(index.data(BADGE_COLOR_ROLE) or t["muted"]))
+            painter.drawText(QtCore.QRect(x + w - bw, r.top() + 4, bw, fm1.height()),
+                             QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter,
+                             badge)
+            title_w = w - bw - 6
         painter.setFont(f1)
         painter.setPen(QtGui.QColor(t["text"]))
-        fm1 = QtGui.QFontMetrics(f1)
-        painter.drawText(QtCore.QRect(x, r.top() + 4, w, fm1.height()),
+        painter.drawText(QtCore.QRect(x, r.top() + 4, title_w, fm1.height()),
                          QtCore.Qt.AlignmentFlag.AlignLeft,
-                         fm1.elidedText(title, QtCore.Qt.TextElideMode.ElideRight, w))
+                         fm1.elidedText(title, QtCore.Qt.TextElideMode.ElideRight, title_w))
 
         f2 = QtGui.QFont(font); f2.setPointSizeF(max(6.5, font.pointSizeF() - 1.5))
         painter.setFont(f2)
@@ -169,7 +211,7 @@ class FileBrowser(QtWidgets.QWidget):
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-        self.view.setMinimumHeight(3 * _FileDelegate.ROW_H + 8)
+        self.view.setMinimumHeight(2 * _FileDelegate.ROW_H + 8)
         self.view.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                 QtWidgets.QSizePolicy.Policy.Expanding)
         lay.addWidget(self.view, 1)

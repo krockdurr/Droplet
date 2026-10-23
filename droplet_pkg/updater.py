@@ -549,6 +549,11 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False,
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     dialog = UpdaterDialog(plan)
+    try:                                   # Droplet's look, following its dark / bright
+        from droplet_pkg.ui.theme import follow_droplet_theme
+        follow_droplet_theme(app, dialog)
+    except Exception:
+        pass                               # never let styling stop an update
     dialog.exec()
     return dialog.exit_code
 

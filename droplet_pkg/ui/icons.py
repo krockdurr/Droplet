@@ -218,6 +218,112 @@ def _clusters(p):
     p.drawLine(P(7.6, 15.4), P(9.4, 12.6)); p.drawLine(P(12.6, 9.4), P(15.4, 7.6))
 
 
+def _spectrum(p, base=19, peaks=((7, 6), (12, 11), (16, 4)), x0=3, x1=21):
+    """A small stick spectrum: baseline at y=base with peaks (x, top)."""
+    path = QtGui.QPainterPath()
+    path.moveTo(x0, base)
+    for x, top in peaks:
+        path.lineTo(x - 1.2, base); path.lineTo(x, top); path.lineTo(x + 1.2, base)
+    path.lineTo(x1, base)
+    p.drawPath(path)
+
+
+def _drift(p, bottom=20):
+    """A shaded baseline hump with peaks standing on it (what baseline
+    correction removes)."""
+    hump = QtGui.QPainterPath()
+    hump.moveTo(3, bottom); hump.quadTo(11, bottom - 9, 21, bottom - 3)
+    area = QtGui.QPainterPath(hump)
+    area.lineTo(21, bottom); area.closeSubpath()
+    fill = QtGui.QColor(p.pen().color()); fill.setAlpha(70)
+    p.fillPath(area, fill)
+    p.drawPath(hump)
+    for x, top in ((8, 3.5), (14, 7)):
+        # foot of the peak on the hump (the quadratic curve at x)
+        t = (x - 3) / 18.0
+        foot = (1 - t) ** 2 * bottom + 2 * (1 - t) * t * (bottom - 9) + t ** 2 * (bottom - 3)
+        p.drawPolyline(QtGui.QPolygonF([P(x - 1.3, foot), P(x, top), P(x + 1.3, foot)]))
+
+
+def _baseline(p):
+    _drift(p, bottom=21)
+    p.drawLine(P(3, 21), P(21, 21))
+
+
+def _ruler(p, y=21.5):
+    p.drawLine(P(3, y), P(21, y))
+    for x in (5, 9, 13, 17, 21):
+        p.drawLine(P(x, y), P(x, y - 1.8))
+
+
+def _recal_auto(p):
+    _spectrum(p, base=17, peaks=((7, 8), (13, 5)), x0=3, x1=16)
+    _ruler(p)
+    # sparkle: done for you
+    p.drawLine(P(19, 3), P(19, 9)); p.drawLine(P(16, 6), P(22, 6))
+
+
+def _recal_manual(p):
+    _spectrum(p, base=17, peaks=((9, 6), (15, 9)), x0=3, x1=21)
+    _ruler(p)
+    # a small double arrow: move the peak by hand
+    p.drawLine(P(4, 3.5), P(13, 3.5))
+    p.drawPolyline(QtGui.QPolygonF([P(6, 1.8), P(4, 3.5), P(6, 5.2)]))
+    p.drawPolyline(QtGui.QPolygonF([P(11, 1.8), P(13, 3.5), P(11, 5.2)]))
+
+
+def _baseline_recal(p):
+    _drift(p, bottom=17.5)
+    _ruler(p)
+
+
+def _normalize(p):
+    dashed = QtGui.QPen(p.pen()); dashed.setDashPattern([1.6, 1.6])
+    pen = p.pen()
+    p.setPen(dashed); p.drawLine(P(2, 5), P(22, 5)); p.setPen(pen)
+    for x, top in ((6, 5), (12, 5), (18, 5)):
+        p.drawLine(P(x, 20), P(x, top + 1.5))
+    p.drawLine(P(3, 20.5), P(21, 20.5))
+
+
+def _residuals(p):
+    p.drawLine(P(3, 12), P(21, 12))
+    p.setBrush(p.pen().color())
+    for x, y in ((5, 9), (8, 15), (11, 10.5), (14, 13.5), (17, 8), (20, 14)):
+        p.drawEllipse(P(x, y), 1.2, 1.2)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+
+def _tof(p):
+    p.drawEllipse(R(2.5, 6.5, 10, 10))
+    p.drawLine(P(7.5, 11.5), P(7.5, 8.6)); p.drawLine(P(7.5, 11.5), P(9.8, 12.8))
+    p.drawLine(P(14, 11.5), P(21, 11.5))
+    p.drawPolyline(QtGui.QPolygonF([P(18.5, 9), P(21, 11.5), P(18.5, 14)]))
+
+
+def _batch(p):
+    p.drawRoundedRect(R(8, 3, 12, 14), 2, 2)
+    path = QtGui.QPainterPath()
+    path.moveTo(5.5, 6); path.lineTo(5.5, 19); path.quadTo(5.5, 20, 6.5, 20); path.lineTo(16, 20)
+    path.moveTo(3, 9); path.lineTo(3, 21.5); path.lineTo(13, 21.5)
+    p.drawPath(path)
+    p.drawLine(P(11, 8), P(17, 8)); p.drawLine(P(11, 11.5), P(17, 11.5))
+
+
+def _toolbar(p):
+    p.drawRoundedRect(R(3, 4, 18, 6), 2, 2)
+    for x in (6.5, 10, 13.5):
+        p.drawLine(P(x, 6.3), P(x, 7.7))
+    p.drawLine(P(5, 15), P(19, 15)); p.drawLine(P(5, 19), P(14, 19))
+
+
+def _settings(p):
+    # three sliders: the line stops on both sides of each knob
+    for y, x in ((7, 15), (12, 8), (17, 13)):
+        p.drawLine(P(4, y), P(x - 2.2, y)); p.drawLine(P(x + 2.2, y), P(20, y))
+        p.drawEllipse(P(x, y), 2, 2)
+
+
 _DRAW = {
     "folder": _folder, "files": _files, "refresh": _refresh, "pan": _pan,
     "zoom": _zoom, "zoom_box": _zoom_box, "pick": _pick, "log": _log,
@@ -227,6 +333,9 @@ _DRAW = {
     "sidebar": _sidebar, "dock": _dock, "search": _search, "prev": _prev,
     "next": _next, "down": _down, "plus": _plus, "close": _close, "help": _help,
     "clusters": _clusters,
+    "baseline": _baseline, "recal_auto": _recal_auto, "recal_manual": _recal_manual,
+    "baseline_recal": _baseline_recal, "normalize": _normalize, "residuals": _residuals,
+    "tof": _tof, "batch": _batch, "toolbar": _toolbar, "settings": _settings,
 }
 
 

@@ -23,9 +23,65 @@
 - The buttons are on top, the list in the middle, and the label / auto-peak options in a card at the bottom.
 - **Dock under the plot** (Peaks menu, its File menu, or the toolbar): the peaks list becomes a panel of the main window. **Ctrl+P** shows / hides it. While docked, *Save* peak list is **Ctrl+Alt+S** (Ctrl+S saves the project).
 
+## Legend
+
+- **Colour + symbol** is the default legend mode.
+- **Unticking a group** takes its peak lists out of the legend (as unticking each list did); ticking it brings them back.
+- **File names**: the legend can name the spectra shown (with their colour) and the peak-list file, under its entries, on screen and in exports. On by default; *Show file names* in the Legend card or window.
+- **Automatic placement**: the legend goes in the corner of the plot with the least data and moves when you zoom or pan. You can also choose a corner, or drag it (*Position → Dragged*). Legends dragged before 3.4 stay where they were.
+- **Saved with the project**: the legend's look and position, and the name of the peak-list file, are stored in `.drp` files and restored when the project is opened.
+- In **dark mode** the legend box is dark, matching the plot (it was a light grey box).
+- The legend used the interface font in the preview but a serif font on the plot until a font was chosen; both now use the interface font.
+- New **Legend card** in the sidebar with the everyday settings (show, file names, symbol mode, font size, columns, position, box). *More…* opens the Legend parameters window.
+- The **Legend parameters** window was reorganised: the main switches on top, a full-width preview drawn on the plot's own background (it was always near-black), then tabs: *Entries*, *Look*, *Symbols on peaks*.
+
+## Sidebar
+
+- Drag the gap between two cards to share the height between them (remembered). A card made smaller than its content scrolls inside.
+- A folded card is only as tall as its title; the room it frees goes to the Data card, or stays empty below the cards.
+- Tool buttons show a label with the tool's **name**, shortcut and what it does, 250 ms after the pointer stops on them. It is drawn inside the window, so it also appears where native tooltips do not (e.g. some Wayland sessions).
+
+## Toolbar and settings
+
+- **Processing tools on the toolbar**, with their own icons: baseline correction, auto-recalibration, manual recalibration, normalization and the recalibration residuals. A **Batch ▾** button holds the folder versions (baseline, auto / manual recalibration, both, normalization, a plot per file). *Baseline + recalibration* and *ToF → mass* are available too, off by default.
+- **Help → Edit Toolbar…** (or right-click the toolbar): tick the tools to show. Saved, so it is kept for the next sessions; *Reset to default* goes back to the standard set.
+- **Help → Export Settings… / Import Settings…**: all settings and saved legend labels in one `.json` file, e.g. to set up Droplet on another computer. Recent folders, files and the last session (paths on this computer) are only included if asked for. After an import Droplet offers to restart so everything applies.
+- The Processing menu's submenus (Baseline Correction, Recalibration, Baseline + Recalibration, Normalize Spectrum) show the same icons as the toolbar.
+- Overlays start in mode **All**, and their mode / dt lists offer *All*, *neg* and *pos*.
+- Dropdown lists show up to 30 values (Qt shows 10), and their last value is no longer half hidden behind a scroll arrow.
+- The **test suite** and **updater** windows use Droplet's theme and follow it when you switch dark / bright in Droplet; the test results' colours read well in both.
+
+## Recalibration residuals viewer
+
+- Same look as the rest of Droplet, in both themes: the plots were always black, with white value labels.
+- File list like the sidebar's: sample name, mode, dt and date, grouped under readable headings ("15.01.2026 10:20" for a "Residuals …" folder), with a filter box, previous / next, and each file's **Δ range** on the right. Files whose Δ range is more than twice the folder's median are flagged in red.
+- The last residuals folder opens again next time (it used to open empty).
+- Above the plots: the sample, its details, and chips for the number of anchors, Δ range, max |Δ|, **mean Δ** (a shift of the whole spectrum shows there) and the fit deviation.
+- **Link m/z axes** (on by default): zoom or pan one plot and the other follows.
+- **Values on anchors** can be switched off; the values have 4 decimals (they had 2, so most read 0.00 or ±0.01). Hovering an anchor rings it and gives its peak list, m/z and Δ.
+- The legend gives each peak list's number of anchors and fit deviation; hovering still highlights the list.
+- Short curves are drawn with dots, so a peak list with one anchor is visible on the left plot.
+- Manual-recalibration preview: *Confirm & Save* is the main button; a hint explains that clicking an anchor finds its peak.
+- Residuals without an anchor table (older files, or a dense curve only) show their curve over the full width, with the numbers and RMS taken from the curve. (With *Link m/z axes*, the curve was held to the empty anchor plot's 0–1 range and nothing was visible.)
+- File names containing dots (e.g. `FL5.40J`) lost everything after the dot when shown without extension: mode, dt and tags are back.
+- **Fit deviation** (named so as not to be confused with the calibration residuals, the Δm/z): how far each anchor is from the fitted calibration (its Δ minus the fitted Δ), so a wrong peak or a peak list that disagrees stands out. Taken from the file's dense fitted curve when it has one, otherwise from the recalibration's own model refitted to the anchors (corrected m/z quadratic in flight time, flight time ∝ √m). The anchor plot shows either the Δ, with the fit drawn dashed, or the deviations (*Deviation from the fit*); each peak list shows its fit deviation in the legend, and the file its overall fit deviation. With 3 anchors or fewer the fit passes through all of them, and no deviation is given.
+- RMS removed from the files and peak lists: Δ is the correction each anchor needed, so its RMS mostly reflected where the peaks are in m/z. Files show their **Δ range** (highest minus lowest Δ) instead.
+- *Anchor plot* option to show or hide the calibration anchors.
+- The two plots are separate widgets in a splitter: the anchor plot no longer stays hidden or half drawn until the window is resized.
+- The files / plots splitter can be moved in a narrow window (long titles and the chips row held the plots panel wide); the chips and options wrap onto more rows instead.
+- Legend entries wrap onto several rows, each as wide as its name; past 4 rows the legend scrolls.
+
 ## Fixes
 
+- **Dock peaks** did nothing visible when the peak list was closed (the usual case): it only remembered the choice. Docking now opens the list under the plot; undocking opens it in its own window.
+
 - **Ctrl+Shift+P** was both *Print* and *add a peak row*, so neither worked. Print is now **Ctrl+Alt+P**.
+- **Switching dark / bright was slow** (seconds with many peak lists, and much longer with the Legend parameters window open, which could look frozen): the style was installed twice per switch, a Python hook slowed every paint, and our event filters saw every re-style event. It is now done in one pass under the wait cursor: about 3× faster without the Legend window and 4× with it (150 peak lists: 4 s → 1.2 s, and 9.6 s → 2.4 s). The Legend parameters window also opens about 3× faster, and its rows and the peak rows no longer carry their own stylesheets.
+- The legend box and the Legend window's preview now switch to dark / bright with the rest (they only did after a legend setting changed).
+- The legend's frame lost half of its right and bottom lines, and text could touch the right edge with fractional display scaling.
+- Tool buttons show their name after 250 ms (in-window label); other tooltips are back to Qt's usual delay, as the global 250 ms setting slowed down every repaint.
+- **Save Project (Ctrl+S) never wrote the file**: it only remembered the path (and the "Project saved" message appeared anyway). Only *Save Project As…* saved. Both save now, and the message only appears when the file was written.
+- Opening a project now remembers its path, so Ctrl+S saves back to it.
 - Toggling Log Y from the View menu rendered the plot twice.
 - *Open Peaks List* was connected twice.
 - **Ctrl+O** opens a folder.

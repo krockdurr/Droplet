@@ -66,9 +66,10 @@ def _files_body():
     text = ("Your spectra live here. Click one in the list to show it, or step "
             "through them with <b>Alt+↑ / Alt+↓</b>; <b>Mode</b>, <b>dt</b> and the "
             "filter box narrow the list down.<br>"
-            "<b>Add overlay</b> puts more spectra on top to compare them, and "
-            "<b>Display</b> holds the sliders. Fold any card by clicking its title, "
-            "or hide the whole sidebar with <b>Ctrl+B</b>.")
+            "<b>Add overlay</b> puts more spectra on top to compare them, "
+            "<b>Display</b> holds the sliders and <b>Legend</b> the legend's settings. "
+            "Fold a card by clicking its title, drag the gap between two cards to "
+            "resize them, or hide the whole sidebar with <b>Ctrl+B</b>.")
     try:
         showing_examples = (os.path.normpath(a.base_dir)
                             == os.path.normpath(a.EXAMPLE_DATA_DIR))

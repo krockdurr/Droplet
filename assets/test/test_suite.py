@@ -1858,6 +1858,11 @@ def run_with_gui():
     qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
     win = QtWidgets.QWidget()
+    try:                         # Droplet's look, following its dark / bright switch
+        from droplet_pkg.ui.theme import follow_droplet_theme
+        follow_droplet_theme(qt_app, win)
+    except Exception:
+        pass                     # the tests must run even if styling fails
     _WIN_TITLE = "Droplet Test Suite"
     win.setWindowTitle(_WIN_TITLE)
     icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
@@ -1931,8 +1936,9 @@ def run_with_gui():
     btn_row.addWidget(close_btn)
     root.addLayout(btn_row)
 
-    _STATUS_COLOR = {PASS: "#1a7a1a", FAIL: "#cc2222", SKIP: "#b07d00", WARN: "#b07d00"}
-    _STATUS_BG    = {PASS: "#eafaea", FAIL: "#faeaea", SKIP: "#faf5e0", WARN: "#faf5e0"}
+    # Mid tones and see-through tints: readable in Droplet's bright and dark themes
+    _STATUS_COLOR = {PASS: "#2e9e43", FAIL: "#e04b4b", SKIP: "#c9921a", WARN: "#c9921a"}
+    _STATUS_BG    = {PASS: "#402e9e43", FAIL: "#40e04b4b", SKIP: "#40c9921a", WARN: "#40c9921a"}
 
     _all_results: list[tuple[str, list[TestResult]]] = []
 
@@ -1951,10 +1957,10 @@ def run_with_gui():
                 if r.detail:
                     item.setToolTip(r.detail)
                 item.setForeground(QtGui.QBrush(
-                    QtGui.QColor(_STATUS_COLOR.get(r.status, "#000"))))
+                    QtGui.QColor(_STATUS_COLOR.get(r.status, "#888"))))
                 if col == 0:
                     item.setBackground(QtGui.QBrush(
-                        QtGui.QColor(_STATUS_BG.get(r.status, "#fff"))))
+                        QtGui.QColor(_STATUS_BG.get(r.status, "#00000000"))))
                 table.setItem(row, col, item)
         table.scrollToBottom()
 
@@ -1966,7 +1972,7 @@ def run_with_gui():
                 if r.status == PASS:   passed  += 1
                 elif r.status == FAIL: failed  += 1
                 else:                  skipped += 1
-        color = "#cc2222" if failed else "#1a7a1a"
+        color = "#e04b4b" if failed else "#2e9e43"
         summary.setText(
             f"<span style='color:{color};'>"
             f"Total {total} - ✓ {passed} passed  ✗ {failed} failed  ⚠ {skipped} skipped"

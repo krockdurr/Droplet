@@ -65,6 +65,14 @@ THEMES = {
 }
 
 _current = ["bright"]
+_style_set = [False]
+# Application-wide event filters (Python) to pause while re-styling: each one
+# would otherwise see the ~30 events re-styling sends to every widget.
+_paused_filters = []
+
+
+def pause_during_restyle(event_filter):
+    _paused_filters.append(event_filter)
 _listeners = []
 
 
@@ -80,6 +88,12 @@ def tokens(mode=None):
 def on_theme_changed(fn):
     """Call ``fn(tokens)`` after every theme change (e.g. to recolour icons)."""
     _listeners.append(fn)
+
+
+def off_theme_changed(fn):
+    """Stop calling ``fn`` (e.g. when the window it updates is deleted)."""
+    if fn in _listeners:
+        _listeners.remove(fn)
 
 
 def _palette(t):
@@ -203,9 +217,13 @@ QComboBox::down-arrow {{ image: url({g['down']}); width: 12px; height: 12px; }}
 QComboBox::down-arrow:disabled {{ image: url({g['down_off']}); }}
 QComboBox[dense="true"] {{ padding: 1px 3px; padding-right: 14px; }}
 QComboBox[dense="true"]::drop-down {{ width: 14px; }}
+/* A plain list (not the menu-style popup), as tall as its items: padding on
+   the view itself is not counted by Qt when it sizes the popup, which hid
+   the last values behind scroll arrows. */
+QComboBox {{ combobox-popup: 0; }}
 QComboBox QAbstractItemView {{
     background: {t['surface']}; color: {t['text']};
-    border: 1px solid {t['border']}; border-radius: 6px; padding: 4px;
+    border: 1px solid {t['border']}; padding: 0px; outline: none;
     selection-background-color: {t['accent_soft']}; selection-color: {t['text']};
 }}
 QSpinBox, QDoubleSpinBox {{ padding-right: 16px; }}
@@ -317,6 +335,12 @@ QTableView, QTreeView, QListView, QTableWidget, QTreeWidget, QListWidget {{
 QSplitter::handle {{ background: transparent; }}
 QSplitter::handle:hover {{ background: {t['accent_line']}; }}
 QSplitter::handle:horizontal {{ width: 5px; }}
+QSplitter#Sidebar::handle:vertical {{ height: 10px; background: transparent; }}
+QSplitter#Sidebar::handle:vertical:hover {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 transparent,
+        stop:0.4 transparent, stop:0.41 {t['accent_line']}, stop:0.59 {t['accent_line']},
+        stop:0.6 transparent, stop:1 transparent);
+}}
 QSplitter::handle:vertical {{ height: 5px; }}
 QStatusBar {{ background: {t['bg']}; color: {t['muted']}; border-top: 1px solid {t['border_soft']}; }}
 QStatusBar::item {{ border: none; }}
@@ -332,13 +356,11 @@ QToolBar#MainToolbar {{
     border-bottom: 1px solid {t['border_soft']}; padding: 3px 6px; spacing: 2px;
 }}
 QToolBar#MainToolbar::separator {{ width: 1px; background: {t['border']}; margin: 5px 6px; }}
-QToolBar#MainToolbar QLabel {{ color: {t['muted']}; }}
 
 QWidget#Sidebar {{ background: {t['bg']}; }}
 QFrame#Card {{
     background: {t['surface']}; border: 1px solid {t['border_soft']}; border-radius: 10px;
 }}
-QFrame#Card QLabel {{ background: transparent; }}
 QToolButton#CardTitleButton {{
     color: {t['muted']}; font-size: 8pt; font-weight: 700; letter-spacing: 1px;
     border: none; padding: 2px 2px; background: transparent;
@@ -350,6 +372,21 @@ QLabel#CardTitle {{
 }}
 QLabel#FolderName {{ font-size: 11pt; font-weight: 700; color: {t['text']}; }}
 QLabel[role="muted"] {{ color: {t['muted']}; }}
+QLabel#SelHandle {{
+    min-width: 12px; max-width: 12px; margin: 1px;
+    border: 1px solid {t['border']}; border-radius: 3px; background: transparent;
+}}
+QLabel#SelHandle[selected="true"] {{ background: {t['accent']}; border-color: {t['accent']}; }}
+QLineEdit[unticked="true"] {{ color: {t['muted']}; font-style: italic; }}
+QFrame#ResLegendEntry {{
+    background: {t['surface2']}; border: 1px solid {t['border_soft']}; border-radius: 6px;
+}}
+QFrame#ResLegendEntry:hover {{ border-color: {t['accent_line']}; background: {t['accent_soft']}; }}
+QLabel#DragHandle {{ color: {t['muted']}; font-size: 14px; }}
+QPushButton[lstate="0"] {{ border: 1px solid {t['border']}; color: {t['muted']}; padding: 0px; border-radius: 4px; }}
+QPushButton[lstate="1"] {{ border: 1px solid #2d6e3e; background: #2d6e3e; color: white; padding: 0px; border-radius: 4px; }}
+QPushButton[lstate="2"] {{ border: 1px solid #2d4a8a; background: #2d4a8a; color: white; padding: 0px; border-radius: 4px; }}
+QPushButton[lstate="3"] {{ border: 1px solid #8a5c2d; background: #8a5c2d; color: white; padding: 0px; border-radius: 4px; }}
 QLabel[role="chip"] {{
     background: {t['accent_soft']}; color: {t['text']};
     border-radius: 8px; padding: 1px 8px; font-size: 8pt;
@@ -373,18 +410,42 @@ QLabel#StatusMode {{
 
 def apply_theme(app, mode="bright"):
     """Restyle the whole application in ``mode`` ("bright" or "dark")."""
+    # Re-styling has to visit every widget of every window, so it is the slow
+    # part (seconds with hundreds of peak lists): do it once, without repaints
+    # or our Show watcher in between, under the wait cursor.
     mode = "dark" if mode == "dark" else "bright"
     _current[0] = mode
     t = tokens(mode)
-    if app.style().objectName().lower() != "fusion":
-        app.setStyle("Fusion")
-    app.setPalette(_palette(t))
-    app.setStyleSheet(_stylesheet(t, _glyph_files(mode, t)))
-    for fn in list(_listeners):
-        try:
-            fn(t)
-        except Exception:
-            pass
+    windows = [w for w in app.topLevelWidgets() if w.isVisible()]
+    busy = bool(windows)
+    if busy:
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+    for w in windows:
+        w.setUpdatesEnabled(False)
+    paused = [f for f in [_watcher] + _paused_filters if f is not None]
+    for f in paused:
+        app.removeEventFilter(f)
+    try:
+        if not _style_set[0]:                 # once: app.style() is a stylesheet
+            app.setStyle("Fusion")            # wrapper afterwards, never "Fusion"
+            _style_set[0] = True
+        app.setPalette(_palette(t))
+        app.setStyleSheet(_stylesheet(t, _glyph_files(mode, t)))
+        for fn in list(_listeners):
+            try:
+                fn(t)
+            except Exception:
+                pass
+    finally:
+        for f in paused:
+            app.installEventFilter(f)
+        for w in windows:
+            try:
+                w.setUpdatesEnabled(True)
+            except RuntimeError:
+                pass
+        if busy:
+            QtWidgets.QApplication.restoreOverrideCursor()
 
 
 def _mark_compact(b):
@@ -422,6 +483,8 @@ class _CompactButtonWatcher(QtCore.QObject):
                 _mark_compact(obj)
             elif isinstance(obj, (QtWidgets.QAbstractSpinBox, QtWidgets.QComboBox)):
                 _widen_fixed_box(obj)
+                if isinstance(obj, QtWidgets.QComboBox) and obj.maxVisibleItems() < 30:
+                    obj.setMaxVisibleItems(30)      # Qt shows 10 values by default
         return False
 
 
@@ -433,3 +496,22 @@ def install_compact_button_watcher(app):
     if _watcher is None:
         _watcher = _CompactButtonWatcher(app)
         app.installEventFilter(_watcher)
+
+
+def follow_droplet_theme(app, owner):
+    """For Droplet's helper programs (test suite, updater), which run in their
+    own process: use the theme saved by Droplet, and follow it when it is
+    switched in Droplet while the helper is open (checked every second)."""
+    store = QtCore.QSettings("LILBID", "PeakViewer")
+
+    def saved_mode():
+        store.sync()
+        return "dark" if store.value("display_mode", "bright") == "dark" else "bright"
+
+    install_compact_button_watcher(app)
+    apply_theme(app, saved_mode())
+    timer = QtCore.QTimer(owner)
+    timer.setInterval(1000)
+    timer.timeout.connect(lambda: saved_mode() != current_mode() and apply_theme(app, saved_mode()))
+    timer.start()
+    return timer

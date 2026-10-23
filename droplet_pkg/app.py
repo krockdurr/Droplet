@@ -470,6 +470,7 @@ splash_step(45, "Preparing the main window…")
 # Theme first, so every widget below is created with the final look
 from droplet_pkg.ui import theme as _theme
 from droplet_pkg.ui.icons import icon as _icon, themed as _themed_icons
+from droplet_pkg.ui.hover_tip import hover_tips
 _theme.install_compact_button_watcher(app)
 _theme.apply_theme(app, settings.value("display_mode", "bright"))
 
@@ -854,6 +855,11 @@ normalize_batch_action   = QtWidgets.QAction("Batch Normalize Folder…",    mai
 normalize_submenu.addAction(normalize_current_action)
 normalize_submenu.addAction(normalize_batch_action)
 
+# Icons on the Processing submenus, the same as their tools on the toolbar
+for _menu, _icon_name in ((baseline_submenu, "baseline"), (recal_submenu, "recal_manual"),
+                          (both_submenu, "baseline_recal"), (normalize_submenu, "normalize")):
+    _themed_icons.set(_menu.menuAction(), _icon_name)
+
 # ── Analysis (new menu, separate from Processing) ──────────────
 new_analysis_menu        = menu_bar.addMenu("Analysis")
 cluster_detect_action    = QtWidgets.QAction("Cluster Detection…", main_win)
@@ -1050,11 +1056,18 @@ _body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 _body_splitter.setChildrenCollapsible(False)
 main_layout.addWidget(_body_splitter, 1)
 
-sidebar = QtWidgets.QWidget()
+# The cards sit in a vertical splitter: drag the gap between two cards to
+# share the height between them. A last, empty filler takes the height that
+# folded cards give back.
+sidebar = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
 sidebar.setObjectName("Sidebar")
-sidebar_layout = QtWidgets.QVBoxLayout(sidebar)
-sidebar_layout.setContentsMargins(10, 10, 6, 10)
-sidebar_layout.setSpacing(10)
+sidebar.setChildrenCollapsible(False)
+sidebar.setHandleWidth(10)
+sidebar.setContentsMargins(10, 10, 6, 10)
+_sidebar_filler = QtWidgets.QWidget()
+_sidebar_filler.setMinimumHeight(0)
+sidebar.addWidget(_sidebar_filler)
+_sidebar_cards = []                 # [(card, title button)] top to bottom
 sidebar_scroll = QtWidgets.QScrollArea()
 sidebar_scroll.setObjectName("Sidebar")
 sidebar_scroll.setWidget(sidebar)
@@ -1076,12 +1089,14 @@ _body_splitter.splitterMoved.connect(
     if _body_splitter.sizes()[0] > 0 else None)
 
 
-def _make_card(title, parent_layout=None, stretch=0):
-    """A rounded sidebar group with a small-caps title that folds the card
-    (remembered between sessions). Returns (card, body layout, header layout);
-    widgets added to the header layout sit on the right of the title."""
+def _make_card(title, grow=False, folded_default=None):
+    """A rounded sidebar card with a small-caps title that folds it
+    (remembered between sessions; `folded_default` on a first run). Returns (card, body layout, header
+    layout); widgets added to the header layout sit right of the title.
+    A `grow` card (Data) takes the spare height when the window grows."""
     card = QtWidgets.QFrame()
     card.setObjectName("Card")
+    card.setProperty("grow", grow)
     outer = QtWidgets.QVBoxLayout(card)
     outer.setContentsMargins(12, 8, 10, 12)
     outer.setSpacing(6)
@@ -1095,30 +1110,117 @@ def _make_card(title, parent_layout=None, stretch=0):
     t.setIconSize(QtCore.QSize(12, 12))
     t.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
     t.setToolTip("Click to fold / unfold")
+    t.setFixedHeight(26)                  # same title height on every card
     head.addWidget(t)
     head.addStretch()
     outer.addLayout(head)
     body = QtWidgets.QWidget()
     lay = QtWidgets.QVBoxLayout(body)
-    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setContentsMargins(0, 0, 2, 0)
     lay.setSpacing(8)
-    outer.addWidget(body, 1)
+    if not grow:                          # extra height stays below the content
+        lay.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+    # The content scrolls inside the card when the card is made smaller than
+    # it, so the gaps between cards can really be dragged.
+    body_scroll = QtWidgets.QScrollArea()
+    body_scroll.setWidget(body)
+    body_scroll.setWidgetResizable(True)
+    body_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    body_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    body_scroll.setMinimumHeight(40)
+    body_scroll.viewport().setAutoFillBackground(False)
+    body.setAutoFillBackground(False)
+    outer.addWidget(body_scroll, 1)
+    card._body = body
     key = f"sidebar/folded/{title}"
 
     def _fold(folded, save=True):
-        body.setVisible(not folded)
+        body_scroll.setVisible(not folded)
         _themed_icons.set(t, "next" if folded else "down")
-        if parent_layout is not None:
-            parent_layout.setStretchFactor(card, 0 if folded else stretch)
+        card.layout().activate()
+        # Folded: exactly the title's height, so it never stands tall and empty
+        card.setMaximumHeight(card.sizeHint().height() if folded else 16777215)
         if save:
             settings.setValue(key, folded)
+            _sidebar_fit(changed=card)
     t.toggled.connect(_fold)
-    if parent_layout is not None:
-        parent_layout.addWidget(card, stretch)
+
+    if folded_default is not None and settings.value(key) is None:
+        settings.setValue(key, folded_default)
+    sidebar.insertWidget(sidebar.count() - 1, card)       # above the filler
+    sidebar.setStretchFactor(sidebar.indexOf(card), 1 if grow else 0)
+    _sidebar_cards.append((card, t))
     folded = settings.value(key, False, type=bool)
     t.setChecked(folded)
     _fold(folded, save=False)
     return card, lay, head
+
+
+def _card_folded(card):
+    return card.maximumHeight() < 16777215
+
+
+def _card_wanted_height(card):
+    """Height showing all of the card's content without scrolling."""
+    m = card.layout().contentsMargins()
+    head = card.layout().itemAt(0).sizeHint().height()
+    return (m.top() + m.bottom() + head + card.layout().spacing()
+            + card._body.sizeHint().height() + 2)
+
+
+def _sidebar_fit(changed=None, reset=False):
+    """Share the sidebar's height after a card was folded / unfolded: folded
+    cards get their title's height, an unfolded one at least what it needs,
+    and the rest goes to the Data card (or to the empty filler below).
+    With reset=True every unfolded card first gets all the height it needs."""
+    n = len(_sidebar_cards)
+    sizes = sidebar.sizes()
+    total = sum(sizes)
+    if total <= 0 or len(sizes) != n + 1:
+        return
+    need = []
+    for i, (card, _t) in enumerate(_sidebar_cards):
+        if _card_folded(card):
+            sizes[i] = card.maximumHeight()
+        elif reset or card is changed or sizes[i] < card.minimumSizeHint().height():
+            sizes[i] = max(_card_wanted_height(card), card.minimumSizeHint().height())
+        need.append(card.minimumSizeHint().height() if not _card_folded(card) else sizes[i])
+    spare = total - sum(sizes[:n])
+    grower = next((i for i, (c, _t) in enumerate(_sidebar_cards)
+                   if c.property("grow") and not _card_folded(c)), None)
+    if spare >= 0:
+        if grower is not None:
+            sizes[grower] += spare
+            spare = 0
+    else:                       # too tall: shrink Data first, then the biggest
+        order = sorted(range(n), key=lambda k: -sizes[k])
+        if grower is not None:
+            order.remove(grower); order.insert(0, grower)
+        for i in order:
+            give = min(-spare, sizes[i] - need[i])
+            if give > 0:
+                sizes[i] -= give
+                spare += give
+            if spare >= 0:
+                break
+    sizes[n] = max(0, spare)
+    sidebar.setSizes(sizes)
+
+
+def _sidebar_restore():
+    """First layout once the window has a size: the saved split, if any."""
+    saved = settings.value("sidebar/sizes", None)
+    try:
+        saved = [int(v) for v in saved] if saved else None
+    except (TypeError, ValueError):
+        saved = None
+    if saved and len(saved) == len(_sidebar_cards) + 1:
+        sidebar.setSizes(saved)
+        _sidebar_fit()
+    else:
+        _sidebar_fit(reset=True)
+
+sidebar.splitterMoved.connect(lambda *_: settings.setValue("sidebar/sizes", sidebar.sizes()))
 
 
 def _icon_button(name, tip, slot=None, checkable=False):
@@ -1130,6 +1232,7 @@ def _icon_button(name, tip, slot=None, checkable=False):
     _themed_icons.set(b, name)
     if slot is not None:
         b.clicked.connect(slot)
+    hover_tips.add(b)
     return b
 
 
@@ -1240,7 +1343,7 @@ class _ScrollFadeShadow(QtWidgets.QWidget):
 #  SECTION 1: Files & Overlays
 # ─────────────────────────────────────────────
 # The Data card: folder, main spectrum, filters and the file list
-files_section, _data_lay, _data_head = _make_card("Data", sidebar_layout, stretch=1)
+files_section, _data_lay, _data_head = _make_card("Data", grow=True)
 
 polarity_combo = QtWidgets.QComboBox()
 polarity_combo.addItems(["neg", "pos", "All"]); polarity_combo.setFixedWidth(60)
@@ -1402,9 +1505,9 @@ overlay_rows_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.Scrol
 overlay_rows_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 overlay_rows_scroll.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
                                   QtWidgets.QSizePolicy.Policy.Fixed)
-overlays_card, _ov_lay, _ov_head = _make_card("Overlays", sidebar_layout)
-_ov_empty_label = _muted("Put more spectra on top of the main one to compare them.")
-_ov_empty_label.setWordWrap(True)
+overlays_card, _ov_lay, _ov_head = _make_card("Overlays")
+_ov_empty_label = _muted("Compare spectra by adding overlays.")
+_ov_empty_label.setToolTip("Overlays are drawn on top of the main spectrum.")
 _ov_lay.addWidget(_ov_empty_label)
 _ov_lay.addWidget(overlay_rows_scroll)
 _overlay_fade = _ScrollFadeShadow(overlay_rows_scroll)
@@ -1465,7 +1568,7 @@ def make_overlay_row(index=0, label=None, path=None, show_save=False):
 
     chk_label = label if label else f"Overlay {index+1}"
     toggle  = QtWidgets.QCheckBox(chk_label); toggle.setChecked(False)
-    pol     = QtWidgets.QComboBox(); pol.addItems(["neg","pos"]); pol.setFixedWidth(60); pol.setEnabled(False)
+    pol     = QtWidgets.QComboBox(); pol.addItems(["All", "neg", "pos"]); pol.setFixedWidth(60); pol.setEnabled(False)
 
     ov_combo = ElidedComboBox()
     ov_combo.setEnabled(False)
@@ -1548,8 +1651,8 @@ def make_overlay_row(index=0, label=None, path=None, show_save=False):
         cur_dt  = ov_dt_combo.currentText()
         cur_pol = pol.currentText()
         files = get_txt_files_filtered(cur_pol, cur_dt)
-        # Auto-switch polarity if preferred has no files
-        if not files:
+        # Auto-switch polarity if preferred has no files ("All" has them all)
+        if not files and cur_pol != "All":
             other = "pos" if cur_pol == "neg" else "neg"
             other_files = get_txt_files_filtered(other, cur_dt)
             if other_files:
@@ -1728,7 +1831,7 @@ _view_mz_lower_spin.valueChanged.connect(
     lambda v: settings.setValue("view_mz_lower", v))
 
 # ── Display card ──
-display_card, _disp_lay, _disp_head = _make_card("Display", sidebar_layout)
+display_card, _disp_lay, _disp_head = _make_card("Display")
 _disp_grid = QtWidgets.QGridLayout()
 _disp_grid.setHorizontalSpacing(8); _disp_grid.setVerticalSpacing(8)
 _disp_grid.addWidget(QtWidgets.QLabel("Highlight"), 0, 0)
@@ -1754,7 +1857,6 @@ for _w in (stacked_logy_chk, stacked_mode_chk, stacked_dyn_scale_chk):
     _disp_checks.addWidget(_w)
 _disp_checks.addStretch()
 _disp_lay.addLayout(_disp_checks)
-sidebar_layout.addStretch(0)
 
 # ── Plot title bar ────────────────────────────────────────────────────────────
 # Main title + auto-parsed filename tokens
@@ -1915,16 +2017,34 @@ status_bar.addPermanentWidget(_status_cursor_label)
 status_bar.addPermanentWidget(_status_mode_label)
 
 # ── Main toolbar ──────────────────────────────────────────────────────────────
-# The same QActions as the menus, so state (checked, enabled) stays in sync
-# both ways, and the menus get the icons too.
-def _tb(action, icon_name, tip):
+# Every tool that can be on the toolbar is listed in _TOOLBAR_ITEMS, in toolbar
+# order; Help → Edit Toolbar… chooses which ones are shown (saved in
+# "toolbar/items"), and _rebuild_main_toolbar() puts them on it. The tools
+# are the menus' own QActions, so state (checked, enabled) stays in sync both
+# ways, and the menus get the icons too.
+_TOOLBAR_GROUPS = ["Files", "Mouse", "Display", "Processing", "Peaks & analysis",
+                   "Export", "Window"]
+_TOOLBAR_ITEMS = []          # dicts: id, group, title, text, shortcut, action, default
+
+def _shortcut_text(action):
+    return action.shortcut().toString(QtGui.QKeySequence.SequenceFormat.NativeText)
+
+def _tb(action, icon_name, title, text, shortcut=None, *, id, group, default=True,
+        after=None):
+    """Make `action` available on the toolbar, with its icon and a hover label
+    giving its name, shortcut and what it does."""
     _themed_icons.set(action, icon_name)
-    action.setToolTip(tip)
-    main_toolbar.addAction(action)
+    action.setToolTip(f"{title}: {text}")
+    item = {"id": id, "group": group, "title": title, "text": text, "icon": icon_name,
+            "shortcut": shortcut, "action": action, "default": default}
+    pos = next((i + 1 for i, it in enumerate(_TOOLBAR_ITEMS) if it["id"] == after),
+               len(_TOOLBAR_ITEMS))
+    _TOOLBAR_ITEMS.insert(pos, item)
     return action
 
-def _tb_text_button(action_or_menu, icon_name, text, tip):
-    """A toolbar button with a label beside its icon (for the main tools)."""
+def _tb_text_button(action_or_menu, icon_name, text, title, tip, shortcut=None, *,
+                    id, group, default=True):
+    """A tool with a label beside its icon (the main tools), or a menu button."""
     btn = QtWidgets.QToolButton()
     btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
     btn.setIconSize(QtCore.QSize(18, 18))
@@ -1932,43 +2052,140 @@ def _tb_text_button(action_or_menu, icon_name, text, tip):
         btn.setMenu(action_or_menu)
         btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         _themed_icons.set(btn, icon_name)
+        btn.setText(text)
     else:
         btn.setDefaultAction(action_or_menu)
         _themed_icons.set(action_or_menu, icon_name)
-    if isinstance(action_or_menu, QtWidgets.QMenu):
-        btn.setText(text)
-    btn.setToolTip(tip)
-    main_toolbar.addWidget(btn)
+    btn.setToolTip(f"{title}: {tip}")
+    hover_tips.add(btn, title, tip, shortcut)
+    # A widget action of our own, so the button survives toolbar rebuilds
+    wa = QtWidgets.QWidgetAction(main_toolbar)
+    wa.setDefaultWidget(btn)
+    _TOOLBAR_ITEMS.append({"id": id, "group": group, "title": title, "text": tip,
+                           "icon": icon_name, "shortcut": shortcut, "action": wa,
+                           "default": default, "widget": True})
     return btn
 
-_tb(open_folder_action, "folder", "Open a folder of spectra  (Ctrl+O)")
-_tb(open_files_action,  "files",  "Open individual files")
-_tb(refresh_action,     "refresh", "Reload the current file  (F5)")
-main_toolbar.addSeparator()
-_tb(pan_mode_action,  "pan",      "Pan: drag to move, scroll to zoom")
-_tb(zoom_mode_action, "zoom_box", "Zoom box: drag a rectangle to zoom  (Z)")
-_tb(pick_mode_action, "pick",     "Pick peaks: click a peak to add it to a peak row  (P)")
+def _toolbar_choices():
+    try:
+        saved = json.loads(settings.value("toolbar/items", "{}") or "{}")
+    except (TypeError, ValueError):
+        saved = {}
+    return {it["id"]: bool(saved.get(it["id"], it["default"])) for it in _TOOLBAR_ITEMS}
+
+def _rebuild_main_toolbar():
+    """Put the chosen tools on the toolbar: groups separated, the window
+    switches on the right, and room left for Dropli in the corner."""
+    shown = _toolbar_choices()
+    main_toolbar.clear()
+    for group in _TOOLBAR_GROUPS:
+        items = [it for it in _TOOLBAR_ITEMS if it["group"] == group and shown[it["id"]]]
+        if group == "Window":
+            main_toolbar.addAction(_tb_spacer_action)
+        elif items and main_toolbar.actions():
+            main_toolbar.addSeparator()
+        for it in items:
+            main_toolbar.addAction(it["action"])
+            if not it.get("widget"):
+                hover_tips.add(main_toolbar.widgetForAction(it["action"]), it["title"],
+                               it["text"], it["shortcut"] or _shortcut_text(it["action"]))
+            if it["id"] == "pick":                       # "Pick into" goes with it
+                main_toolbar.addAction(_pick_into_action)
+    main_toolbar.addAction(_tb_dropli_gap_action)
+
+def _widget_action(widget):
+    wa = QtWidgets.QWidgetAction(main_toolbar)
+    wa.setDefaultWidget(widget)
+    return wa
+
+_tb(open_folder_action, "folder", "Open folder", "Show the spectra of a folder in the sidebar.",
+    id="open_folder", group="Files")
+_tb(open_files_action,  "files",  "Open files", "Pick individual spectrum files, from anywhere.",
+    id="open_files", group="Files")
+_tb(refresh_action,     "refresh", "Reload", "Read the current file again from disk.",
+    id="reload", group="Files")
+_tb(pan_mode_action,  "pan",      "Pan", "Drag to move the view, scroll to zoom.",
+    id="pan", group="Mouse")
+_tb(zoom_mode_action, "zoom_box", "Zoom box", "Drag a rectangle on the plot to zoom into it.", "Z",
+    id="zoom", group="Mouse")
+_tb(pick_mode_action, "pick",     "Pick peaks",
+    "Click a peak to add it to a peak row (chosen in “Pick into”); double-click removes it.", "P",
+    id="pick", group="Mouse")
 # Wrapped so apply_mouse_mode() can keep showing/hiding pick_into_widget itself
 # (a widget placed straight into a toolbar ignores setVisible).
 _pick_into_holder = QtWidgets.QWidget()
 _pick_into_holder_lay = QtWidgets.QHBoxLayout(_pick_into_holder)
 _pick_into_holder_lay.setContentsMargins(0, 0, 0, 0)
 _pick_into_holder_lay.addWidget(pick_into_widget)
-main_toolbar.addWidget(_pick_into_holder)
-main_toolbar.addSeparator()
-_tb(stacked_logy_action, "log",       "Logarithmic Y axis")
-_tb(stacked_mode_action, "stacked",   "Stacked: one row per spectrum")
-_tb(sigma3_clip_action,  "sigma",     "σ clip: hide baseline noise on screen (level in the sidebar)")
-_tb(grid_action,         "grid",      "Grid lines")
-_tb(crosshair_action,    "crosshair", "Cross-lines following the cursor")
-main_toolbar.addSeparator()
+_pick_into_action = _widget_action(_pick_into_holder)
+_tb(stacked_logy_action, "log",       "Log Y", "Logarithmic intensity axis.",
+    id="log_y", group="Display")
+_tb(stacked_mode_action, "stacked",   "Stacked", "One row per spectrum (main and overlays), sharing the m/z axis.",
+    id="stacked", group="Display")
+_tb(sigma3_clip_action,  "sigma",     "σ clip",
+    "Hide baseline noise on screen (your data is not changed). The level is in the sidebar's Display card.",
+    id="sigma", group="Display")
+_tb(grid_action,         "grid",      "Grid", "Show or hide the grid lines.",
+    id="grid", group="Display")
+_tb(crosshair_action,    "crosshair", "Cross-lines", "Dashed lines following the cursor.",
+    id="crosshair", group="Display")
+
+# Processing: the current spectrum; the batch tasks share one menu button
+_tb(baseline_action,      "baseline",     "Baseline correction",
+    "Remove the baseline of the current spectrum (method in Processing → Baseline Correction).",
+    id="baseline", group="Processing")
+_tb(auto_recal_action,    "recal_auto",   "Auto-recalibrate",
+    "Recalibrate the current spectrum automatically, from its known peaks.",
+    id="auto_recal", group="Processing")
+_tb(recal_action,         "recal_manual", "Manual recalibration",
+    "Recalibrate the current spectrum from peaks you pick and confirm.",
+    id="manual_recal", group="Processing")
+_tb(both_current_action,  "baseline_recal", "Baseline + recalibration",
+    "Baseline correction, then automatic recalibration, of the current spectrum.",
+    id="baseline_recal", group="Processing", default=False)
+_tb(normalize_current_action, "normalize", "Normalize",
+    "Normalize the current spectrum and save it to a file.",
+    id="normalize", group="Processing")
+_tb(tof_to_mass_action,   "tof",          "ToF → mass",
+    "Convert time-of-flight spectra to m/z from reference peaks.",
+    id="tof", group="Processing", default=False)
+_tb(view_residuals_action, "residuals",   "Recalibration residuals",
+    "Look at how well recalibrations fit, file by file.",
+    id="residuals", group="Processing")
+_batch_menu = QtWidgets.QMenu(main_win)
+# Own entries with names that read well on their own ("Batch Process
+# Folder…" only makes sense inside Processing → Baseline Correction)
+for _src, _ic, _txt in ((baseline_batch_action, "baseline", "Baseline correction…"),
+                        (recal_batch_action, "recal_auto", "Auto-recalibration…"),
+                        (manual_recal_batch_action, "recal_manual", "Manual recalibration…"),
+                        (both_batch_action, "baseline_recal", "Baseline + recalibration…"),
+                        (normalize_batch_action, "normalize", "Normalization…"),
+                        (None, None, None),
+                        (batch_export_plots_action, "export", "Export a plot per file…")):
+    if _src is None:
+        _batch_menu.addSeparator()
+        continue
+    _themed_icons.set(_src, _ic)
+    _a = _batch_menu.addAction(_txt)
+    _themed_icons.set(_a, _ic)
+    _a.triggered.connect(lambda _c=False, a=_src: a.trigger())
+_tb_text_button(_batch_menu, "batch", "Batch", "Batch",
+                "Process a whole folder: baseline, recalibration, both, normalization, "
+                "or export a plot per file.", id="batch", group="Processing")
+
 peaks_action.setIconText("Peaks")      # the toolbar button's label
-peaks_toolbar_btn = _tb_text_button(peaks_action, "peaks", "Peaks", "Peak lists  (Ctrl+P)")
-_tb(legend_params_action,  "legend",   "Legend parameters…")
-_tb(ratio_mode_action,     "ratio",    "Peak intensity ratio  (R)")
-_tb(area_action,           "area",     "Peak list area tools…")
-_tb(cluster_detect_action, "clusters", "Cluster detection…")
-main_toolbar.addSeparator()
+peaks_toolbar_btn = _tb_text_button(peaks_action, "peaks", "Peaks", "Peaks",
+                                    "Open the peak lists (shows / hides them when docked).", "Ctrl+P",
+                                    id="peaks", group="Peaks & analysis")
+_tb(legend_params_action,  "legend",   "Legend parameters",
+    "Everything about the peak-list legend; the everyday settings are also in the sidebar's Legend card.",
+    id="legend", group="Peaks & analysis")
+_tb(ratio_mode_action,     "ratio",    "Peak ratio", "Click two peaks to get their intensity ratio.", "R",
+    id="ratio", group="Peaks & analysis")
+_tb(area_action,           "area",     "Peak areas", "Integrate peak areas, with a check of each peak's boundaries.",
+    id="areas", group="Peaks & analysis")
+_tb(cluster_detect_action, "clusters", "Cluster detection", "Find series of peaks spaced by a repeating mass.",
+    id="clusters", group="Peaks & analysis")
 _export_menu = QtWidgets.QMenu(main_win)
 for _a in (export_png_action, export_svg_action, export_pdf_action, export_pgf_action):
     _export_menu.addAction(_a)
@@ -1976,32 +2193,37 @@ _export_menu.addSeparator()
 _export_menu.addAction(batch_export_plots_action)
 _export_menu.addSeparator()
 _export_menu.addAction(print_action)
-_tb_text_button(_export_menu, "export", "Export", "Export the plot as PNG, SVG, PDF or PGF")
-_tb(copy_plot_action, "copy", "Copy the plot to the clipboard  (Ctrl+Shift+C)")
+_tb_text_button(_export_menu, "export", "Export", "Export",
+                "Save the plot as PNG, SVG, PDF or PGF (LaTeX), export a whole folder, or print.",
+                id="export", group="Export")
+_tb(copy_plot_action, "copy", "Copy plot", "Copy the plot as an image, to paste anywhere.",
+    id="copy", group="Export")
 
 _tb_spacer = QtWidgets.QWidget()
 _tb_spacer.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                          QtWidgets.QSizePolicy.Policy.Preferred)
-main_toolbar.addWidget(_tb_spacer)
+_tb_spacer_action = _widget_action(_tb_spacer)
 
 theme_toggle_action = QtWidgets.QAction("Dark / bright", main_win)
 theme_toggle_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+D"))
 theme_toggle_action.triggered.connect(
     lambda: (bright_action if current_display == "dark" else dark_action).trigger())
-main_toolbar.addAction(theme_toggle_action)
+_tb(theme_toggle_action, "moon", "Dark / bright",
+    "Switch the whole interface and the plot between dark and bright.",
+    id="theme", group="Window")
 
 def _update_theme_toggle_icon():
     dark = _theme.current_mode() == "dark"
     theme_toggle_action.setIcon(_icon("sun" if dark else "moon"))
-    theme_toggle_action.setToolTip(
-        ("Switch to bright mode" if dark else "Switch to dark mode") + "  (Ctrl+Shift+D)")
 _theme.on_theme_changed(lambda _t: _update_theme_toggle_icon())
+_themed_icons.refresh()          # registered icons first, then the toggle's own
 _update_theme_toggle_icon()
 
 sidebar_action = QtWidgets.QAction("Show Sidebar", main_win, checkable=True)
 sidebar_action.setShortcut(QtGui.QKeySequence("Ctrl+B"))
 sidebar_action.setChecked(settings.value("sidebar_visible", True, type=bool))
-_tb(sidebar_action, "sidebar", "Show / hide the sidebar  (Ctrl+B)")
+_tb(sidebar_action, "sidebar", "Sidebar", "Show or hide the sidebar (files, overlays, display, legend).",
+    id="sidebar", group="Window")
 sidebar_scroll.setVisible(sidebar_action.isChecked())
 sidebar_action.toggled.connect(lambda v: (sidebar_scroll.setVisible(v),
                                           settings.setValue("sidebar_visible", v)))
@@ -2011,7 +2233,11 @@ view_menu.insertSeparator(view_menu.actions()[1])
 # Leave room on the right for Dropli, who sits in the window's top-right corner
 _tb_dropli_gap = QtWidgets.QWidget()
 _tb_dropli_gap.setFixedWidth(58)
-main_toolbar.addWidget(_tb_dropli_gap)
+_tb_dropli_gap_action = _widget_action(_tb_dropli_gap)
+
+# Right-click on the toolbar: choose its tools (instead of Qt's "hide toolbar")
+main_toolbar.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+main_toolbar.customContextMenuRequested.connect(lambda pos: _toolbar_context_menu(pos))
 
 plot = plot_widget.addPlot()
 plot.setLabel('bottom', 'm/z')
@@ -7302,7 +7528,7 @@ def _draw_peak_symbols_on_plot():
 
     if not settings.value("legend/symbols_on_peaks", False, type=bool):
         return
-    if not settings.value("legend/use_symbols", False, type=bool):
+    if not settings.value("legend/use_symbols", True, type=bool):
         return
     if not _legend_entries:
         return
@@ -7505,7 +7731,7 @@ def _draw_peak_labels(show_labels, show_masses, mass_threshold_abs,
 
     _show_sym_on_peaks = (
         settings.value("legend/symbols_on_peaks", False, type=bool) and
-        settings.value("legend/use_symbols",      False, type=bool) and
+        settings.value("legend/use_symbols",      True, type=bool) and
         bool(_legend_entries)
     )
     # mz_sym_groups: [(representative_mz, stack_count), ...]
@@ -7837,7 +8063,7 @@ def _draw_stacked_peak_labels(sub_plot, data_df, mz_vals, int_vals, return_items
 
     _show_sym_on_peaks = (
         settings.value("legend/symbols_on_peaks", False, type=bool) and
-        settings.value("legend/use_symbols",      False, type=bool) and
+        settings.value("legend/use_symbols",      True, type=bool) and
         bool(_legend_entries)
     )
 
@@ -8856,6 +9082,8 @@ def _do_render_plot():
     global highlighted_ranges, locked_x_range, locked_y_range
     global _label_text_items, _main_curve, _overlay_curves
 
+    _legend_sources_refresh()       # file names in the legend follow the data shown
+
     if lock_axes_action.isChecked():
         locked_x_range = plot.vb.viewRange()[0]
         locked_y_range = plot.vb.viewRange()[1]
@@ -9398,37 +9626,46 @@ def _show_toast(message, duration_ms=2500):
     status_bar.showMessage(message, duration_ms)
 
 def _write_project(path):
-    """Core project serialization — path must already be validated."""
+    """Write the session to path (.drp added if missing). True when saved;
+    on failure the user is told why and False is returned."""
     if not path.lower().endswith(".drp"):
         path += ".drp"
+    try:
+        project = _project_dict()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(project, fh, indent=2)
+    except Exception as e:
+        QtWidgets.QMessageBox.warning(
+            main_win, "Save Failed", f"Could not save project:\n{e}")
+        return False
     _current_project_path[0] = path
     settings.setValue("last_project_path", path)
+    return True
+
+def _ask_project_path(title):
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        main_win, title, _get_dialog_dir("project"), "Droplet Project (*.drp)")
+    if path:
+        _set_dialog_dir("project", path)
+    return path
 
 def save_project():
-    """Save to the current project path; if none, prompt for a path."""
-    if _current_project_path[0] and os.path.isfile(_current_project_path[0]):
-        path = _current_project_path[0]
-    else:
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            main_win, "Save Project", _get_dialog_dir("project"), "Droplet Project (*.drp)")
-        if path: _set_dialog_dir("project", path)
+    """Save to the current project path; if none, ask for one. True when saved.
+    (It used to only remember the path: Ctrl+S never wrote anything.)"""
+    path = _current_project_path[0]
+    if not (path and os.path.isfile(path)):
+        path = _ask_project_path("Save Project")
         if not path:
-            return
-        if not path.lower().endswith(".drp"):
-            path += ".drp"
-        _current_project_path[0] = path
+            return False
+    return _write_project(path)
 
 def save_project_as():
-    """Always prompt for a new path."""
-    path, _ = QtWidgets.QFileDialog.getSaveFileName(
-        main_win, "Save Project As", _get_dialog_dir("project"), "Droplet Project (*.drp)")
-    if path: _set_dialog_dir("project", path)
-    if not path:
-        return
-    if not path.lower().endswith(".drp"):
-        path += ".drp"
-    _current_project_path[0] = path
+    """Always ask for a new path. True when saved."""
+    path = _ask_project_path("Save Project As")
+    return bool(path) and _write_project(path)
 
+def _project_dict():
+    """Everything a .drp project file holds."""
     project = {}
 
     # ── Main file (absolute path) ──────────────────────────────────────
@@ -9510,19 +9747,15 @@ def save_project_as():
 
     project["version"] = "1.0"
 
+    # ── Legend: look and position (the plot as it was made) ───────────
+    project["legend"] = _legend_settings_dict()
+    project["peak_list_file"] = _current_peak_list_path[0] or ""
+
     # ── Peak list confirmation ────────────────────────────────────────
     _cp = _confirmation_panel_ref[0]
     if _cp is not None:
         project["peak_confirmation"] = _cp.to_project_dict()
-
-    try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(project, fh, indent=2)
-        QtWidgets.QMessageBox.information(
-            main_win, "Project Saved", f"Project saved to:\n{path}")
-    except Exception as e:
-        QtWidgets.QMessageBox.warning(
-            main_win, "Save Failed", f"Could not save project:\n{e}")
+    return project
 
 def open_project():
     global base_dir, all_txt_files, is_virtual, virtual_file_list
@@ -9700,6 +9933,15 @@ def open_project():
     # (Older projects may contain "plots" from the removed Plotting Tool;
     #  they are ignored.)
 
+    # ── Legend look and position (projects saved before 3.4 have none:
+    #    the current legend settings are kept) ──────────────────────────
+    if isinstance(project.get("legend"), dict):
+        _apply_legend_settings_dict(project["legend"])
+    if "peak_list_file" in project:      # the peak lists came from the project
+        _update_peaks_win_title(project["peak_list_file"] or None)
+
+    _current_project_path[0] = path          # so Ctrl+S saves back to it
+    settings.setValue("last_project_path", path)
     render_plot()
 
     # ── Restore peak list confirmation ────────────────────────────────
@@ -9948,6 +10190,8 @@ class PeakGroupHeader(QtWidgets.QWidget):
             "font-size:10px; border:none; color:#4a90d9;" if checked
             else "font-size:10px; border:none; color:#555555;")
         _render_peaks_or_full()
+        _auto_sync_legend_entries()          # the group's lists leave / rejoin the legend
+        _rebuild_peak_legend_on_plot()
 
     def _on_collapsed(self, v):
         self._gd["collapsed"] = v
@@ -10407,19 +10651,32 @@ _select_anchor         = [None]  # anchor index for shift-click range selection
 _peak_row_clipboard    = []      # snapshots for copy/paste
 _last_edited_row       = [None]  # row whose peaks_input or label_input was last focused
 
+def _color_swatch_icon(color):
+    """A rounded colour square, for colour buttons (instead of a stylesheet)."""
+    pm = QtGui.QPixmap(36, 36)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 60), 1))
+    p.setBrush(QtGui.QColor(color))
+    p.drawRoundedRect(QtCore.QRectF(0.5, 0.5, 17, 17), 3.5, 3.5)
+    p.end()
+    return QtGui.QIcon(pm)
+
+def _set_style_property(w, name, value):
+    """Set a property the stylesheet uses and re-style only `w`, if it changed."""
+    if w.property(name) != value:
+        w.setProperty(name, value)
+        w.style().unpolish(w)
+        w.style().polish(w)
+
 def _update_selection_visuals():
     for i, row in enumerate(custom_peak_rows):
         sh = row.get("sel_handle")
         if sh is None:
             continue
-        if i in _selected_peak_indices:
-            sh.setStyleSheet(
-                "min-width:12px;max-width:12px;border:1px solid #4a90d9;"
-                "background:#4a90d9;border-radius:2px;margin:1px;")
-        else:
-            sh.setStyleSheet(
-                "min-width:12px;max-width:12px;border:1px solid #555;"
-                "background:transparent;border-radius:2px;margin:1px;")
+        _set_style_property(sh, "selected", i in _selected_peak_indices)
 
 class _PeaksWinSelClearFilter(QtCore.QObject):
     """Clear peak-row selection when the user clicks anywhere in the peaks
@@ -10450,7 +10707,8 @@ class _PeaksWinSelClearFilter(QtCore.QObject):
 _peaks_win_sel_filter = _PeaksWinSelClearFilter(app)
 # Installed once the event loop runs: it only reacts to clicks, and every
 # event passes through it, which slowed building the rows at start-up.
-QtCore.QTimer.singleShot(0, lambda: app.installEventFilter(_peaks_win_sel_filter))
+QtCore.QTimer.singleShot(0, lambda: (app.installEventFilter(_peaks_win_sel_filter),
+                                     _theme.pause_during_restyle(_peaks_win_sel_filter)))
 
 def _is_legend_candidate(row) -> bool:
     """A row can appear in the legend when it has a label and peaks."""
@@ -10587,12 +10845,18 @@ def _restore_peak_session(path):
         _rebuild_peak_legend_on_plot()
         _sync_confirmation_panel()
 
+def _group_highlight_on(row) -> bool:
+    """False when the row's group is unticked (its highlight toggle is off)."""
+    gname = row.get("group_name", "Unclassified")
+    return next((gd.get("highlight", True) for gd in _peak_groups if gd["name"] == gname), True)
+
 def _auto_sync_legend_entries():
     """Rebuild _legend_entries from the peak rows (the only source of truth).
 
     Rows sharing a label give one entry (the first row's colour, symbol and
-    column). Unticked rows are kept, flagged "checked": False, so the
-    on-screen legend can offer them; exports leave them out.
+    column). Unticked rows, and rows of an unticked group, are kept, flagged
+    "checked": False / "group_on": False, so the on-screen legend can still
+    show them greyed (see legend/show_unticked); exports leave them out.
     """
     global _legend_entries, _legend_row_entries
     _fill_missing_row_symbols()
@@ -10609,6 +10873,7 @@ def _auto_sync_legend_entries():
             "col":     row["legend_col"][0] or 1,
             "row":     row,
             "checked": row["checkbox"].isChecked(),
+            "group_on": _group_highlight_on(row),
             "shown":   True,
         }
         all_rows.append(e)
@@ -10700,9 +10965,8 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     sel_handle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
     sel_handle.setToolTip(
         "Click to select  |  Ctrl: toggle  |  Shift: range  |  Ctrl+Shift: extend range")
-    sel_handle.setStyleSheet(
-        "min-width:12px;max-width:12px;border:1px solid #555;"
-        "background:transparent;border-radius:2px;margin:1px;")
+    sel_handle.setObjectName("SelHandle")       # styled in theme.py (no own stylesheet:
+                                                # those make theme switches slow)
 
     _gn = group_name if any(g["name"] == group_name for g in _peak_groups) else (
         _peak_groups[0]["name"] if _peak_groups else "Unclassified")
@@ -10711,14 +10975,15 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     drag_handle.setFixedWidth(10)
     drag_handle.setCursor(QtCore.Qt.CursorShape.SizeVerCursor)
     drag_handle.setToolTip("Drag to reorder")
-    drag_handle.setStyleSheet("color: gray; font-size: 14px;")
+    drag_handle.setObjectName("DragHandle")
 
     checkbox  = QtWidgets.QCheckBox(); checkbox.setChecked(checked)
     btn       = QtWidgets.QPushButton(); btn.setFixedSize(22, 22)
     row_color = [QtGui.QColor(color)]
 
     def update_btn():
-        btn.setStyleSheet(f"background-color: {row_color[0].name()}; border: 1px solid gray;")
+        btn.setIcon(_color_swatch_icon(row_color[0]))
+        btn.setIconSize(QtCore.QSize(18, 18))
     def set_color(chosen):
         row_color[0] = QtGui.QColor(chosen); update_btn(); _render_peaks_or_full(); _auto_sync_legend_entries(); _rebuild_peak_legend_on_plot()
     def pick():
@@ -10914,18 +11179,9 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     _1L_state = [0]
     _row_ref  = [None]   # filled in after row_data is created
 
-    _L_STYLES = {
-      0: ("L",   "border:1px solid gray; color:gray;"),
-      1: ("m",   "border:1px solid gray; background:#2d6e3e; color:white;"),
-      2: ("L",   "border:1px solid gray; background:#2d4a8a; color:white;"),
-      3: ("mL",  "border:1px solid gray; background:#8a5c2d; color:white;"),
-    }
-    _1L_STYLES = {
-      0: ("1L",  "border:1px solid gray; color:gray;"),
-      1: ("1m",  "border:1px solid gray; background:#2d6e3e; color:white;"),
-      2: ("1L",  "border:1px solid gray; background:#2d4a8a; color:white;"),
-      3: ("1mL", "border:1px solid gray; background:#8a5c2d; color:white;"),
-    }
+    # Text per state; the colours are QPushButton[lstate="0…3"] in theme.py
+    _L_STYLES  = {0: ("L", 0),  1: ("m", 1),  2: ("L", 2),  3: ("mL", 3)}
+    _1L_STYLES = {0: ("1L", 0), 1: ("1m", 1), 2: ("1L", 2), 3: ("1mL", 3)}
 
     L_btn  = QtWidgets.QPushButton("L");  L_btn.setFixedSize(28, 22)
     lL_btn = QtWidgets.QPushButton("1L"); lL_btn.setFixedSize(32, 22)
@@ -10933,9 +11189,9 @@ def _add_peak_row_base(checked=True, color=None, peaks_text="", label_text="", r
     lL_btn.setToolTip("Cycle: off → mass → label → mass+label  (first/lowest-m/z peak only)\nShift+click: apply new state to all rows in this group")
 
     def _refresh_L():
-        t, s = _L_STYLES[_L_state[0]];  L_btn.setText(t);  L_btn.setStyleSheet(s)
+        t, s = _L_STYLES[_L_state[0]];  L_btn.setText(t);  _set_style_property(L_btn, "lstate", s)
     def _refresh_1L():
-        t, s = _1L_STYLES[_1L_state[0]]; lL_btn.setText(t); lL_btn.setStyleSheet(s)
+        t, s = _1L_STYLES[_1L_state[0]]; lL_btn.setText(t); _set_style_property(lL_btn, "lstate", s)
 
     def _cycle_L():
         _L_state[0] = (_L_state[0] + 1) % 4; _refresh_L()
@@ -12422,7 +12678,12 @@ def auto_load_peaks():
 # ─────────────────────────────────────────────
 #  Peak list import / export
 # ─────────────────────────────────────────────
+_current_peak_list_path = [None]     # peak-list file shown, for the legend footer
+
 def _update_peaks_win_title(path=None):
+    _current_peak_list_path[0] = path or None
+    if "_legend_sources_refresh" in globals():
+        _legend_sources_refresh()
     if path:
         peaks_win.setWindowTitle(f"Peaks  —  {os.path.basename(path)}")
     else:
@@ -12664,6 +12925,7 @@ def set_display_mode(mode):
     global current_display
     current_display = mode
     settings.setValue("display_mode", mode)
+    settings.sync()          # the test suite / updater windows follow it from disk
     if _theme.current_mode() != ("dark" if mode == "dark" else "bright"):
         _theme.apply_theme(app, mode)      # the whole interface, not only the plot
     if mode == "dark":
@@ -12684,6 +12946,10 @@ def set_display_mode(mode):
     if _stacked_sub_plots:
         _destroy_stacked_layout()
     render_plot()
+    # The legend box follows the plot's background: redraw it, and the
+    # previews showing it (they only redrew when a legend setting changed)
+    if "_legend_settings_changed" in globals():
+        _legend_settings_changed()
 
 # ─────────────────────────────────────────────
 #  View menu: mouse mode
@@ -12962,11 +13228,142 @@ def _legend_anchor_at(item, top_left, save=False):
     vals = (ax, ay, round(ox, 1), round(oy, 1))
     item.anchor(itemPos=(ax, ay), parentPos=(ax, ay), offset=(vals[2], vals[3]))
     if save:
+        settings.setValue("legend/placement", "manual")    # dragged: stays put
         _set_legend_anchor(vals)
 
 def reset_legend_position():
+    """Back to automatic placement (the emptiest corner of the plot)."""
+    settings.setValue("legend/placement", "auto")
     _set_legend_anchor(_LEGEND_DEFAULT_ANCHOR)
     _rebuild_peak_legend_on_plot()
+
+# ── Placement: auto (emptiest corner), a fixed corner, or where it was dragged
+_LEGEND_CORNERS = {                       # name → anchor (ax, ay, ox, oy)
+    "top_right":    (1.0, 0.0, -10.0, 10.0),
+    "top_left":     (0.0, 0.0, 10.0, 10.0),
+    "bottom_right": (1.0, 1.0, -10.0, -10.0),
+    "bottom_left":  (0.0, 1.0, 10.0, -10.0),
+}
+LEGEND_PLACEMENTS = [("auto", "Auto"), ("top_right", "Top right"),
+                     ("top_left", "Top left"), ("bottom_right", "Bottom right"),
+                     ("bottom_left", "Bottom left"), ("manual", "Dragged")]
+
+def _legend_placement():
+    pl = settings.value("legend/placement", "", type=str)
+    if pl not in dict(LEGEND_PLACEMENTS):
+        # Before 3.4 there was no placement setting: a legend that had been
+        # dragged keeps its place, otherwise it is placed automatically.
+        pl = "auto" if _legend_at_default_position() else "manual"
+    return pl
+
+def _legend_corner_cover(target, w_px, h_px):
+    """{corner: how much of the legend's area there would cover data, 0–1}."""
+    vb = target.vb
+    (x0, x1), (y0, y1) = vb.viewRange()
+    vw, vh = vb.width(), vb.height()
+    if vw <= 0 or vh <= 0 or x1 <= x0 or y1 <= y0:
+        return None
+    fx = min(1.0, (w_px + 10) / vw)
+    fy = min(1.0, (h_px + 10) / vh)
+    xs, ys = [], []
+    for item in target.listDataItems():
+        if not item.isVisible():
+            continue
+        xd, yd = item.getData()                 # as displayed (log-mapped)
+        if xd is None or len(xd) == 0:
+            continue
+        xs.append(np.asarray(xd, float)); ys.append(np.asarray(yd, float))
+    if not xs:
+        return None
+    x = np.concatenate(xs); y = np.concatenate(ys)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    nb = 40
+    out = {}
+    for name, (ax, ay, _, _) in _LEGEND_CORNERS.items():
+        xa = x1 - fx * (x1 - x0) if ax else x0
+        xb = x1 if ax else x0 + fx * (x1 - x0)
+        ya = y0 if ay else y1 - fy * (y1 - y0)       # view y grows upwards
+        yb = y0 + fy * (y1 - y0) if ay else y1
+        m = (x >= xa) & (x <= xb)
+        if not m.any():
+            out[name] = 0.0
+            continue
+        b = np.minimum(((x[m] - xa) / (xb - xa) * nb).astype(int), nb - 1)
+        lo = np.full(nb, np.inf); hi = np.full(nb, -np.inf)
+        np.minimum.at(lo, b, y[m]); np.maximum.at(hi, b, y[m])
+        cover = np.clip(np.minimum(hi, yb) - np.maximum(lo, ya), 0, None) / (yb - ya)
+        out[name] = float(np.nan_to_num(cover, nan=0.0, neginf=0.0).mean())
+    return out
+
+def _legend_auto_corner(target, w_px, h_px, current=None):
+    """The corner covering the least data. The legend only moves when another
+    corner is clearly better, so it does not jump around while panning."""
+    cover = _legend_corner_cover(target, w_px, h_px)
+    if not cover:
+        return current or "top_right"
+    best = min(_LEGEND_CORNERS, key=lambda c: cover[c])   # ties: top right first
+    if current in cover and cover[current] <= cover[best] + 0.05:
+        return current
+    return best
+
+_legend_auto_current = [None]
+
+def _place_peak_legend(item, target):
+    """Anchor the legend item according to the placement setting."""
+    pl = _legend_placement()
+    if pl == "manual":
+        ax, ay, ox, oy = _legend_anchor()
+    else:
+        if pl == "auto":
+            pl = _legend_auto_corner(target, item._w, item._h, _legend_auto_current[0])
+            _legend_auto_current[0] = pl
+        ax, ay, ox, oy = _LEGEND_CORNERS[pl]
+    item.anchor(itemPos=(ax, ay), parentPos=(ax, ay), offset=(ox, oy))
+
+# Every legend setting, with its default: saved in projects, and shared by
+# the sidebar's Legend card and the Legend parameters window.
+_LEGEND_SETTINGS = {
+    "show": True, "show_unticked": False, "show_sources": True,
+    "use_symbols": True, "font_pt": 11, "font_family": "",
+    "show_box": True, "shadow": False, "rounded": False, "ncols": 1,
+    "legend_symbol_size": 12, "width": 0, "height": 0, "wh_linked": False,
+    "symbols_on_peaks": False, "symbol_y_offset": 0.0, "symbol_size": 10,
+    "placement": "auto", "anchor": "",
+}
+
+def _legend_setting(key):
+    default = _LEGEND_SETTINGS[key]
+    return settings.value(f"legend/{key}", default, type=type(default))
+
+def _legend_settings_dict() -> dict:
+    return {k: _legend_setting(k) for k in _LEGEND_SETTINGS}
+
+# Called (without arguments) after the legend settings were changed from
+# outside a window showing them (a project opened, the sidebar card used).
+_legend_settings_listeners: list = []
+
+def _legend_settings_changed(source=None):
+    """Redraw after a legend setting changed, and refresh the other places
+    that show the settings (`source` is the one that made the change)."""
+    for fn in list(_legend_settings_listeners):
+        if fn is source:
+            continue
+        try:
+            fn()
+        except RuntimeError:
+            _legend_settings_listeners.remove(fn)
+    _rebuild_peak_legend_on_plot()
+    _render_peaks_or_full()
+
+def _apply_legend_settings_dict(d: dict):
+    for k, default in _LEGEND_SETTINGS.items():
+        if k in d:
+            try:
+                settings.setValue(f"legend/{k}", type(default)(d[k]))
+            except (TypeError, ValueError):
+                pass
+    _legend_settings_changed()
 
 def _legend_params_from_settings() -> dict:
     return {
@@ -12976,11 +13373,39 @@ def _legend_params_from_settings() -> dict:
         "shadow":      settings.value("legend/shadow",      False, type=bool),
         "rounded":     settings.value("legend/rounded",     False, type=bool),
         "ncols":       settings.value("legend/ncols",       1,     type=int),
-        "use_symbols": settings.value("legend/use_symbols", False, type=bool),
+        "use_symbols": settings.value("legend/use_symbols", True, type=bool),
         "width":       settings.value("legend/width",       0,     type=int),
         "height":      settings.value("legend/height",      0,     type=int),
         "symbol_size": settings.value("legend/legend_symbol_size", 12, type=int),
     }
+
+def _legend_sources() -> list:
+    """The legend footer: [(text, QColor or None)] naming the main spectrum,
+    the overlays shown and the peak-list file (legend/show_sources)."""
+    if not settings.value("legend/show_sources", True, type=bool):
+        return []
+    stem = lambda p: os.path.splitext(os.path.basename(str(p)))[0]
+    out = []
+    main_path = combo.currentData()
+    if main_path and main_toggle.isChecked():
+        out.append((stem(main_path), QtGui.QColor(_main_spectrum_color[0])))
+    for ov in overlay_list:
+        if not ov["toggle"].isChecked():
+            continue
+        path = ov.get("fixed_path") or ov["combo"].currentData()
+        out.append((stem(path) if path else ov["toggle"].text(), QtGui.QColor(ov["color"])))
+    if _current_peak_list_path[0] and _legend_entries:
+        out.append((f"Peak list: {os.path.basename(_current_peak_list_path[0])}", None))
+    return out
+
+_legend_sources_last = [None]
+
+def _legend_sources_refresh():
+    """Rebuild the legend if the files it names have changed."""
+    key = [(t, c.name() if c is not None else None) for t, c in _legend_sources()]
+    if key != _legend_sources_last[0]:
+        _legend_sources_last[0] = key
+        _rebuild_peak_legend_on_plot()
 
 def _legend_visible_entries(export: bool) -> list:
     show_unticked = settings.value("legend/show_unticked", False, type=bool)
@@ -12988,7 +13413,8 @@ def _legend_visible_entries(export: bool) -> list:
     for e in _legend_entries:
         if not e.get("shown", True):
             continue
-        if not e.get("checked", True) and (export or not show_unticked):
+        ticked = e.get("checked", True) and e.get("group_on", True)
+        if not ticked and (export or not show_unticked):
             continue
         out.append(e)
     return out
@@ -13070,11 +13496,13 @@ def _rebuild_peak_legend_on_plot():
     if not settings.value("legend/show", True, type=bool):
         return
     entries = _legend_visible_entries(_legend_export_mode)
-    if not entries:
+    sources = _legend_sources()
+    if not entries and not sources:
         return
 
     params = {
         **_legend_params_from_settings(),
+        "sources":     sources,
         "dark_bg":     current_display == "dark",
         "interactive": not _legend_export_mode,
         "in_view":     None if _legend_export_mode else _legend_labels_in_view(),
@@ -13085,14 +13513,9 @@ def _rebuild_peak_legend_on_plot():
 
     # In stacked mode anchor to the first (top) sub-plot so the legend
     # floats over the entire stacked area; otherwise use the main plot.
-    if _stacked_mode and _stacked_sub_plots:
-        target_vb = _stacked_sub_plots[0].vb
-    else:
-        target_vb = plot.vb
-
-    _peak_legend.setParentItem(target_vb)
-    ax, ay, ox, oy = _legend_anchor()
-    _peak_legend.anchor(itemPos=(ax, ay), parentPos=(ax, ay), offset=(ox, oy))
+    target = _stacked_sub_plots[0] if (_stacked_mode and _stacked_sub_plots) else plot
+    _peak_legend.setParentItem(target.vb)
+    _place_peak_legend(_peak_legend, target)
 
 def _legend_model_changed():
     """Something the legend shows changed (symbol, column, visibility, …)."""
@@ -13104,43 +13527,74 @@ def _legend_model_changed():
 _legend_view_timer = QtCore.QTimer()
 _legend_view_timer.setSingleShot(True)
 _legend_view_timer.setInterval(150)
-_legend_view_timer.timeout.connect(lambda: (
+def _on_legend_view_timer():
+    if _peak_legend is None or _legend_export_mode:
+        return
     _peak_legend.set_in_view(_legend_labels_in_view())
-    if _peak_legend is not None and not _legend_export_mode else None))
+    if _legend_placement() == "auto":            # find the emptiest corner again
+        target = _stacked_sub_plots[0] if (_stacked_mode and _stacked_sub_plots) else plot
+        _place_peak_legend(_peak_legend, target)
+
+_legend_view_timer.timeout.connect(_on_legend_view_timer)
 plot.vb.sigRangeChanged.connect(lambda *_: _legend_view_timer.start())
 
 
-class _SymbolCombo(QtWidgets.QComboBox):
-    """Symbol picker that shows only the glyph when closed (and is only as wide
-    as that), while its drop-down list shows the full names at their width."""
+class _SymbolCombo(QtWidgets.QToolButton):
+    """Symbol picker showing only the glyph, with the full names in its menu.
+
+    A tool button rather than a combo box: the Legend parameters window has
+    one per peak list, and a combo box (with its list of items) costs several
+    times more to create and to re-style when the theme changes. It keeps
+    the small part of the QComboBox API the window uses."""
+
+    currentIndexChanged = QtCore.pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.addItem("None", "")
-        for code, name in MARKER_SYMBOL_NAMES.items():
-            self.addItem(name, code)
-        glyph_w = max(self.fontMetrics().horizontalAdvance(g)
-                      for g in list(MARKER_SYMBOL_GLYPHS.values()) + ["–"])
-        arrow_w = self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_ScrollBarExtent)
-        self.setFixedWidth(glyph_w + arrow_w + 16)
+        self._items = [("None", "")] + [(n, c) for c, n in MARKER_SYMBOL_NAMES.items()]
+        self._index = 0
+        self.setFixedWidth(40)
+        self.clicked.connect(self._open_menu)
+        self._refresh()
 
-    def paintEvent(self, _event):
-        painter = QtWidgets.QStylePainter(self)
-        opt = QtWidgets.QStyleOptionComboBox()
-        self.initStyleOption(opt)
-        code = self.currentData() or ""
-        if self.toolTip() != self.currentText():
-            self.setToolTip(self.currentText())          # full name on hover
-        opt.currentText = MARKER_SYMBOL_GLYPHS.get(code, "–")
-        opt.currentIcon = QtGui.QIcon()
-        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, opt)
-        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, opt)
+    _shared_menu = None          # one menu for every picker, filled on opening
 
-    def showPopup(self):
-        view = self.view()
-        view.setMinimumWidth(view.sizeHintForColumn(0) + 2 * view.frameWidth()
-                             + self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_ScrollBarExtent))
-        super().showPopup()
+    def _open_menu(self):
+        menu = _SymbolCombo._shared_menu
+        if menu is None:
+            menu = _SymbolCombo._shared_menu = QtWidgets.QMenu()
+        menu.clear()
+        for i, (name, _code) in enumerate(self._items):
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            act.setChecked(i == self._index)
+            act.triggered.connect(lambda _c=False, k=i: self.setCurrentIndex(k))
+        menu.exec(self.mapToGlobal(QtCore.QPoint(0, self.height())))
+
+    def _refresh(self):
+        name, code = self._items[self._index]
+        self.setText(MARKER_SYMBOL_GLYPHS.get(code, "–") + " ▾")
+        self.setToolTip(name)
+
+    def findData(self, code):
+        return next((i for i, (_n, c) in enumerate(self._items) if c == code), -1)
+
+    def currentIndex(self):
+        return self._index
+
+    def currentData(self):
+        return self._items[self._index][1]
+
+    def currentText(self):
+        return self._items[self._index][0]
+
+    def setCurrentIndex(self, i):
+        i = max(0, min(int(i), len(self._items) - 1))
+        if i != self._index:
+            self._index = i
+            self._refresh()
+            if not self.signalsBlocked():
+                self.currentIndexChanged.emit(i)
 
 
 class LegendEntryWidget(QtWidgets.QWidget):
@@ -13165,6 +13619,7 @@ class LegendEntryWidget(QtWidgets.QWidget):
 
         # Selection handle, as in the Peaks window
         self._sel_handle = QtWidgets.QLabel()
+        self._sel_handle.setObjectName("SelHandle")
         self._sel_handle.setFixedWidth(14)
         self._sel_handle.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
         self._sel_handle.setToolTip(
@@ -13228,7 +13683,7 @@ class LegendEntryWidget(QtWidgets.QWidget):
         # Column assignment — "col:" label before the spin
         lay.addSpacing(6)
         col_lbl = QtWidgets.QLabel("col:")
-        col_lbl.setStyleSheet("color: gray;")
+        col_lbl.setProperty("role", "muted")
         lay.addWidget(col_lbl)
         self._col_spin = QtWidgets.QSpinBox()
         self._col_spin.setRange(1, 10)
@@ -13257,8 +13712,9 @@ class LegendEntryWidget(QtWidgets.QWidget):
             w.blockSignals(True)
         try:
             if new["color"] != old.get("color"):
-                self._swatch.setStyleSheet(
-                    f"background-color:{new['color']}; border:1px solid #666;")
+                pm = QtGui.QPixmap(14, 14)
+                pm.fill(QtGui.QColor(new["color"]))
+                self._swatch.setIcon(QtGui.QIcon(pm))
             if new["symbol"] != old.get("symbol"):
                 self._sym_combo.setCurrentIndex(max(self._sym_combo.findData(new["symbol"]), 0))
             if new["col"] != old.get("col"):
@@ -13273,7 +13729,9 @@ class LegendEntryWidget(QtWidgets.QWidget):
                 w.blockSignals(False)
         if new["checked"] != old.get("checked"):
             unticked = not new["checked"]
-            self._label_edit.setStyleSheet("color: gray; font-style: italic;" if unticked else "")
+            self._label_edit.setProperty("unticked", unticked)      # styled in theme.py
+            self._label_edit.style().unpolish(self._label_edit)
+            self._label_edit.style().polish(self._label_edit)
             self._label_edit.setToolTip(
                 "Unticked: not in the legend or in copied / exported plots" if unticked
                 else ("Label (renames the peak list)" if self._row is not None
@@ -13283,9 +13741,11 @@ class LegendEntryWidget(QtWidgets.QWidget):
     # ── selection ──────────────────────────────────────────────────────────
 
     def set_selected(self, selected: bool):
-        self._sel_handle.setStyleSheet(
-            "min-width:12px;max-width:12px;border:1px solid #555;border-radius:2px;margin:1px;"
-            + ("background:#3d8ee0;" if selected else "background:transparent;"))
+        if self._sel_handle.property("selected") == selected:
+            return
+        self._sel_handle.setProperty("selected", selected)      # styled in theme.py
+        self._sel_handle.style().unpolish(self._sel_handle)
+        self._sel_handle.style().polish(self._sel_handle)
 
     def _on_handle_pressed(self, event):
         if self._dialog is not None:
@@ -13400,21 +13860,26 @@ class LegendPreviewWidget(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding)
 
     def set_data(self, entries, use_symbols, font_pt, font_family,
-                 show_box, shadow, rounded, ncols, width=0, height=0, symbol_size=12):
+                 show_box, shadow, rounded, ncols, width=0, height=0, symbol_size=12,
+                 sources=None):
         self._entries = list(entries)
         self._params = {"use_symbols": use_symbols, "font_pt": font_pt,
                         "font_family": font_family, "show_box": show_box,
                         "shadow": shadow, "rounded": rounded, "ncols": ncols,
                         "width": width, "height": height, "symbol_size": symbol_size,
-                        "dark_bg": False, "interactive": False, "in_view": None}
+                        "sources": sources or [],
+                        "dark_bg": current_display == "dark",
+                        "interactive": False, "in_view": None}
         self.update()
 
     def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QtGui.QColor("#1e1e1e"))
-        if not self._entries:
-            painter.setPen(QtGui.QColor("#666"))
+        # The plot's background, as in exports
+        painter.fillRect(self.rect(), QtGui.QColor("#000000" if self._params.get("dark_bg")
+                                                   else "#ffffff"))
+        if not self._entries and not self._params.get("sources"):
+            painter.setPen(QtGui.QColor("#888"))
             painter.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter,
                              "No active peak-list entries")
             painter.end()
@@ -13542,7 +14007,8 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
             self._params["in_view"] = labels
             self.update()
 
-    # ── browsing: click to tick / untick, double-click to zoom, hover ──────
+    # ── browsing: hover marks the entry's peaks, double-click zooms to them,
+    #    drag moves the legend ─────────────────────────────────────────────
 
     def _entry_at(self, pos):
         for rect, entry in self._hit:
@@ -13562,7 +14028,8 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
                        else QtCore.Qt.CursorShape.ArrowCursor)
         if row is not None:
             n = len(parse_peaks_text(row["peaks_input"].text()))
-            state = "ticked" if entry.get("checked", True) else "unticked"
+            state = ("ticked" if entry.get("checked", True) and entry.get("group_on", True)
+                     else "unticked")
             self.setToolTip(f"{entry['label']}  ({n} peaks, {state})\n"
                             "Double-click: zoom to its peaks   ·   Drag: move the legend")
         else:
@@ -13593,14 +14060,17 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
         _legend_clicked(entry["row"], ev.double())
 
     def boundingRect(self):
-        return QtCore.QRectF(0, 0, self._w, self._h)
+        extra = 5 if self._params.get("shadow") else 0      # the shadow is offset by 4 px
+        return QtCore.QRectF(0, 0, self._w + extra, self._h + extra)
 
     # ── internal helpers ───────────────────────────────────────────────────
 
     def _font(self):
         fam = self._params.get("font_family", "")
         pt  = max(6, self._params.get("font_pt", 11))
-        f   = QtGui.QFont(fam or "")
+        # No family chosen yet: the interface font. QFont("") resolved to a
+        # different (serif) font on the plot than in the preview.
+        f   = QtGui.QFont(fam) if fam else QtGui.QFont(QtWidgets.QApplication.font())
         f.setPointSize(pt)
         return f
 
@@ -13633,6 +14103,10 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
                 default=40)
             col_widths.append(SWATCH + GAP + max_text + PAD)
 
+        # A little more room on the right: with fractional display scaling,
+        # text can be drawn slightly wider than measured and touch the frame.
+        if col_widths:
+            col_widths[-1] += 6
         target_w = 0 if natural else int(self._params.get("width", 0) or 0)
         natural_w = PAD + sum(col_widths)
         if target_w > natural_w and col_widths:
@@ -13641,14 +14115,60 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
 
         return col_entries, col_widths, ROW_H, fm, SWATCH
 
+    def _footer_font(self):
+        f = self._font()
+        f.setPointSize(max(6, f.pointSize() - 2))
+        return f
+
+    def _footer_size(self):
+        """(width, height) of the footer naming the files (0, 0 if none)."""
+        sources = self._params.get("sources") or []
+        if not sources:
+            return 0, 0
+        fm = QtGui.QFontMetrics(self._footer_font())
+        swatch = 16
+        w = max(swatch + 5 + fm.horizontalAdvance(t) for t, _ in sources)
+        h = len(sources) * (fm.height() + 2) + (8 if self._entries else 0)
+        return w + 22, h
+
     def natural_size(self):
         """Size the legend needs for its content (ignoring Size W × H)."""
+        fw, fh = self._footer_size()
         if not self._entries:
-            return 60, 20
+            return (int(fw), int(fh + 12)) if fh else (60, 20)
         col_entries, col_widths, ROW_H, _, _ = self._layout(natural=True)
         PAD = 8
         max_rows = max((len(c) for c in col_entries), default=1)
-        return int(PAD + sum(col_widths)), int(PAD + max_rows * ROW_H + PAD)
+        return (int(max(PAD + sum(col_widths), fw)),
+                int(PAD + max_rows * ROW_H + PAD + fh))
+
+    def _paint_footer(self, painter, text_color):
+        sources = self._params.get("sources") or []
+        if not sources:
+            return
+        font = self._footer_font()
+        fm = QtGui.QFontMetrics(font)
+        PAD, SW = 8, 16
+        col_entries, _, ROW_H, _, _ = self._layout(natural=True) if self._entries else ([], [], 0, None, 0)
+        max_rows = max((len(c) for c in col_entries), default=0)
+        y = PAD + max_rows * ROW_H + (4 if self._entries else PAD - 2)
+        muted = QtGui.QColor(text_color)
+        muted.setAlpha(170)
+        if self._entries:                                   # thin separator
+            painter.setPen(QtGui.QPen(QtGui.QColor(150, 150, 150, 120), 1))
+            painter.drawLine(QtCore.QPointF(PAD, y), QtCore.QPointF(self._w - PAD, y))
+            y += 4
+        painter.setFont(font)
+        from droplet_pkg.io.pgf_writer import text_anchor
+        for text, color in sources:
+            mid = y + (fm.height() + 2) / 2
+            if color is not None:
+                painter.setPen(QtGui.QPen(color, 2))
+                painter.drawLine(QtCore.QPointF(PAD, mid), QtCore.QPointF(PAD + SW, mid))
+            painter.setPen(muted)
+            with text_anchor("left"):
+                painter.drawText(QtCore.QPointF(PAD + SW + 5, y + 1 + fm.ascent()), text)
+            y += fm.height() + 2
 
     def _measure(self):
         w, h = self.natural_size()
@@ -13659,7 +14179,7 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
     # ── rendering ──────────────────────────────────────────────────────────
 
     def paint(self, painter, option, widget=None):
-        if not self._entries:
+        if not self._entries and not self._params.get("sources"):
             return
 
         p        = self._params
@@ -13690,18 +14210,24 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
             else:
                 painter.drawRect(sr)
 
-        # Background
+        # Background: light box on a bright plot, dark box on a dark plot
+        # (the plot's own background, so exports match what is on screen)
         if show_box:
-            painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 210)))
-            painter.setPen(QtGui.QPen(QtGui.QColor(150, 150, 150, 200), 1))
-            br = QtCore.QRectF(0, 0, w, h)
+            if dark_bg:
+                painter.setBrush(QtGui.QBrush(QtGui.QColor(29, 33, 41, 225)))
+                painter.setPen(QtGui.QPen(QtGui.QColor(90, 98, 112, 220), 1))
+            else:
+                painter.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 255, 210)))
+                painter.setPen(QtGui.QPen(QtGui.QColor(150, 150, 150, 200), 1))
+            # Half a pixel inside, so the whole 1 px frame is within the item
+            # (on its outer edge, half of the right and bottom lines was lost)
+            br = QtCore.QRectF(0.5, 0.5, w - 1, h - 1)
             if rad:
                 painter.drawRoundedRect(br, rad, rad)
             else:
                 painter.drawRect(br)
 
-        text_color = (QtGui.QColor("#111111") if (show_box or not dark_bg)
-                      else QtGui.QColor("#eeeeee"))
+        text_color = QtGui.QColor("#e8ebf0") if dark_bg else QtGui.QColor("#111111")
 
         # A fixed Size W × H smaller than the content cuts it off at the box.
         painter.save()
@@ -13727,7 +14253,7 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
                     painter.setPen(QtCore.Qt.PenStyle.NoPen)
                     painter.setBrush(QtGui.QColor(120, 120, 120, 45))
                     painter.drawRoundedRect(cell, 3, 3)
-                unticked = not entry.get("checked", True)
+                unticked = not (entry.get("checked", True) and entry.get("group_on", True))
                 if unticked:
                     painter.setOpacity(0.35)
                 elif (in_view is not None and entry.get("row") is not None
@@ -13754,6 +14280,7 @@ class PeakListLegendItem(pg.GraphicsWidget, pg.GraphicsWidgetAnchor):
                 painter.setOpacity(1.0)
 
             cx += col_widths[ci] if ci < len(col_widths) else PAD
+        self._paint_footer(painter, text_color)
         painter.restore()
 
 
@@ -13887,7 +14414,7 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
     def __init__(self, parent, peak_rows, spectrum_legend, plot_ref, app_settings):
         super().__init__(parent, QtCore.Qt.WindowType.Window)
         self.setWindowTitle("Legend parameters")
-        self.setMinimumHeight(560)
+        self.setMinimumSize(560, 480)
 
         self._peak_rows       = peak_rows
         self._spectrum_legend = spectrum_legend   # pg.LegendItem for spectra
@@ -13907,12 +14434,16 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
     def closeEvent(self, event):
         if self._sync_from_model in _legend_listeners:
             _legend_listeners.remove(self._sync_from_model)
+        if self._load_from_settings in _legend_settings_listeners:
+            _legend_settings_listeners.remove(self._load_from_settings)
         super().closeEvent(event)
 
     # ── UI construction ─────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Menu bar ──────────────────────────────────────────────────
+        # Layout: menu bar · the main switches · preview (full width, as the
+        # legend is usually wide) · tabs: Entries / Look / Symbols on peaks.
+        # The preview / tabs split is a splitter.
         vbox = QtWidgets.QVBoxLayout(self)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
@@ -13934,255 +14465,304 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
         self._install_stay_on_top(menu_bar, self._settings)
         vbox.addWidget(menu_bar)
 
-        # ── Content row: QSplitter so the user can resize panels ──────
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        vbox.addWidget(splitter, 1)
+        body = QtWidgets.QWidget()
+        body_lay = QtWidgets.QVBoxLayout(body)
+        body_lay.setContentsMargins(12, 8, 12, 12)
+        body_lay.setSpacing(8)
+        vbox.addWidget(body, 1)
 
-        # ── Left panel ────────────────────────────────────────────────
-        left_inner = QtWidgets.QWidget()
-        left_scroll = QtWidgets.QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setWidget(left_inner)
-        left_scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        splitter.addWidget(left_scroll)
-
-        lay = QtWidgets.QVBoxLayout(left_inner)
-        lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(10)
-
-        # ── Show on plot ──
-        self.show_cb = QtWidgets.QCheckBox("Show peak-list legend on plot")
-        self.show_cb.setChecked(
-            self._settings.value("legend/show", True, type=bool))
+        # ── The main switches ──
+        switches = QtWidgets.QHBoxLayout()
+        switches.setSpacing(16)
+        self.show_cb = QtWidgets.QCheckBox("Show the legend on the plot")
         self.show_cb.toggled.connect(self._apply)
-        lay.addWidget(self.show_cb)
-
-        self.show_unticked_cb = QtWidgets.QCheckBox(
-            "Keep unticked peak lists in the on-screen legend (greyed)")
+        self.show_sources_cb = QtWidgets.QCheckBox("Show file names")
+        self.show_sources_cb.setToolTip(
+            "Name the spectra (with their colour) and the peak-list file at the\n"
+            "bottom of the legend, on screen and in exports.")
+        self.show_sources_cb.toggled.connect(self._apply)
+        self.show_unticked_cb = QtWidgets.QCheckBox("Keep unticked lists, greyed")
         self.show_unticked_cb.setToolTip(
-            "Unticked peak lists are shown faded in the on-screen legend.\n"
-            "They never appear in copied or exported plots.")
-        self.show_unticked_cb.setChecked(
-            self._settings.value("legend/show_unticked", False, type=bool))
+            "Unticked peak lists (or lists of an unticked group) stay in the\n"
+            "on-screen legend, faded. They never appear in copied or exported plots.")
         self.show_unticked_cb.toggled.connect(self._apply)
-        lay.addWidget(self.show_unticked_cb)
+        for w in (self.show_cb, self.show_sources_cb, self.show_unticked_cb):
+            switches.addWidget(w)
+        switches.addStretch()
+        body_lay.addLayout(switches)
 
-        # ── Mode ──
-        mode_grp = QtWidgets.QGroupBox("Symbol mode")
-        mode_lay = QtWidgets.QVBoxLayout(mode_grp)
-        self.mode_color_rb  = QtWidgets.QRadioButton("Color only  (colored line swatch)")
-        self.mode_symbol_rb = QtWidgets.QRadioButton("Color + symbol")
-        self.mode_color_rb.setChecked(
-            not self._settings.value("legend/use_symbols", False, type=bool))
-        self.mode_symbol_rb.setChecked(
-            self._settings.value("legend/use_symbols", False, type=bool))
-        mode_lay.addWidget(self.mode_color_rb)
-        mode_lay.addWidget(self.mode_symbol_rb)
+        split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        split.setChildrenCollapsible(False)
+        body_lay.addWidget(split, 1)
 
-        sym_btns = QtWidgets.QHBoxLayout()
-        fill_btn = QtWidgets.QPushButton("⚡  Fill missing symbols")
+        # ── Preview ──
+        prev_box = QtWidgets.QWidget()
+        prev_lay = QtWidgets.QVBoxLayout(prev_box)
+        prev_lay.setContentsMargins(0, 0, 0, 4)
+        prev_lay.setSpacing(4)
+        prev_title = QtWidgets.QLabel("PREVIEW, AS IN EXPORTS")
+        prev_title.setObjectName("CardTitle")
+        prev_lay.addWidget(prev_title)
+        self._preview = LegendPreviewWidget()
+        self._preview.setMinimumSize(220, 110)
+        prev_lay.addWidget(self._preview, 1)
+        split.addWidget(prev_box)
+
+        tabs = QtWidgets.QTabWidget()
+        tabs.setDocumentMode(True)
+        split.addWidget(tabs)
+        split.setSizes([190, 420])
+
+        # ── Tab: Entries ──
+        ent_page = QtWidgets.QWidget()
+        ent_lay = QtWidgets.QVBoxLayout(ent_page)
+        ent_lay.setContentsMargins(4, 8, 4, 4)
+        hint = QtWidgets.QLabel(
+            "One line per peak list, kept in sync with the Peaks window: "
+            "tick = shown (same tick) · ▲▼ reorder · colour, symbol, label and "
+            "column edit the peak list itself.")
+        hint.setWordWrap(True)
+        hint.setProperty("role", "muted")
+        ent_lay.addWidget(hint)
+        self._entries_container = QtWidgets.QWidget()
+        self._entries_layout = QtWidgets.QVBoxLayout(self._entries_container)
+        self._entries_layout.setContentsMargins(0, 0, 0, 0)
+        self._entries_layout.setSpacing(2)
+        ent_outer = QtWidgets.QWidget()
+        ent_outer_lay = QtWidgets.QVBoxLayout(ent_outer)
+        ent_outer_lay.setContentsMargins(0, 0, 0, 0)
+        ent_outer_lay.addWidget(self._entries_container)
+        ent_outer_lay.addStretch()
+        ent_scroll = QtWidgets.QScrollArea()
+        ent_scroll.setWidgetResizable(True)
+        ent_scroll.setWidget(ent_outer)
+        ent_lay.addWidget(ent_scroll, 1)
+        tabs.addTab(ent_page, "Entries")
+
+        # ── Tab: Look ──
+        look_page = QtWidgets.QWidget()
+        look = QtWidgets.QGridLayout(look_page)
+        look.setContentsMargins(8, 10, 8, 8)
+        look.setHorizontalSpacing(10); look.setVerticalSpacing(8)
+        r = 0
+
+        def label(text):
+            l = QtWidgets.QLabel(text)
+            l.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            return l
+
+        self.mode_color_rb  = QtWidgets.QRadioButton("Colour only")
+        self.mode_symbol_rb = QtWidgets.QRadioButton("Colour + symbol")
+        mode_row = QtWidgets.QHBoxLayout(); mode_row.setSpacing(14)
+        mode_row.addWidget(self.mode_symbol_rb); mode_row.addWidget(self.mode_color_rb)
+        mode_row.addStretch()
+        look.addWidget(label("Entries show"), r, 0); look.addLayout(mode_row, r, 1); r += 1
+
+        sym_btns = QtWidgets.QHBoxLayout(); sym_btns.setSpacing(6)
+        fill_btn = QtWidgets.QPushButton("Fill missing symbols")
         fill_btn.setToolTip(
             "Give a free symbol to every peak list that has none, and switch\n"
-            "to Color + symbol mode. Symbols already set are never changed.\n"
+            "to Colour + symbol mode. Symbols already set are never changed.\n"
             "(New peak lists get a symbol automatically.)")
         fill_btn.clicked.connect(self._fill_missing_symbols)
         reassign_btn = QtWidgets.QPushButton("Reassign all symbols…")
         reassign_btn.setToolTip("Replace every symbol, in legend order.")
         reassign_btn.clicked.connect(self._reassign_all_symbols)
-        sym_btns.addWidget(fill_btn)
-        sym_btns.addWidget(reassign_btn)
-        mode_lay.addLayout(sym_btns)
+        self.legend_sym_size_spin = QtWidgets.QSpinBox()
+        self.legend_sym_size_spin.setRange(4, 40)
+        self.legend_sym_size_spin.setSuffix(" px")
+        self.legend_sym_size_spin.setToolTip(
+            "Size of the symbols in the legend (Colour + symbol mode).\n"
+            "The symbols drawn over peaks have their own size (Symbols on peaks tab).")
+        self.legend_sym_size_spin.valueChanged.connect(self._apply)
+        sym_btns.addWidget(fill_btn); sym_btns.addWidget(reassign_btn)
+        sym_btns.addSpacing(10); sym_btns.addWidget(QtWidgets.QLabel("Size"))
+        sym_btns.addWidget(self.legend_sym_size_spin); sym_btns.addStretch()
+        look.addWidget(label("Symbols"), r, 0); look.addLayout(sym_btns, r, 1); r += 1
 
-        self.symbols_on_peaks_cb = QtWidgets.QCheckBox("Show symbols over peaks on plot")
-        self.symbols_on_peaks_cb.setToolTip(
-            "Draw the legend symbol directly on each highlighted peak in the main view.\n"
-            "Requires 'Color + symbol' mode. Labels are shifted up automatically\n"
-            "to avoid overlapping the symbols.")
-        self.symbols_on_peaks_cb.setChecked(
-            self._settings.value("legend/symbols_on_peaks", False, type=bool))
-        self.symbols_on_peaks_cb.toggled.connect(self._apply)
-        mode_lay.addWidget(self.symbols_on_peaks_cb)
-
-        sym_pos_row = QtWidgets.QHBoxLayout()
-        sym_pos_row.setContentsMargins(18, 0, 0, 0)
-
-        _sym_h_lbl = QtWidgets.QLabel("Height offset:")
-        _sym_h_lbl.setStyleSheet("color: gray;")
-        sym_pos_row.addWidget(_sym_h_lbl)
-        self.symbol_y_offset_spin = QtWidgets.QDoubleSpinBox()
-        self.symbol_y_offset_spin.setRange(0.0, 1e9)       # no practical limit
-        self.symbol_y_offset_spin.setSingleStep(1.0)
-        self.symbol_y_offset_spin.setDecimals(1)
-        self.symbol_y_offset_spin.setSuffix(" %")
-        self.symbol_y_offset_spin.setValue(
-            100.0 * self._settings.value("legend/symbol_y_offset", 0.0, type=float))
-        self.symbol_y_offset_spin.setFixedWidth(96)
-        self.symbol_y_offset_spin.setToolTip(
-            "Height of the symbols above the peak tip, as a percentage of the peak\n"
-            "height (100 % = twice the peak). Works the same on linear and log\n"
-            "axes: on a log axis every peak gets the same visual gap.")
-        self.symbol_y_offset_spin.valueChanged.connect(self._apply)
-        sym_pos_row.addWidget(self.symbol_y_offset_spin)
-        sym_pos_row.addSpacing(10)
-
-        _sym_sz_lbl = QtWidgets.QLabel("Size:")
-        _sym_sz_lbl.setStyleSheet("color: gray;")
-        sym_pos_row.addWidget(_sym_sz_lbl)
-        self.symbol_size_spin = QtWidgets.QSpinBox()
-        self.symbol_size_spin.setRange(4, 40)
-        self.symbol_size_spin.setValue(
-            self._settings.value("legend/symbol_size", 10, type=int))
-        self.symbol_size_spin.setSuffix(" px")
-        self.symbol_size_spin.setFixedWidth(68)
-        self.symbol_size_spin.setToolTip("Diameter of the symbols drawn over peaks (pixels).")
-        self.symbol_size_spin.valueChanged.connect(self._apply)
-        sym_pos_row.addWidget(self.symbol_size_spin)
-        sym_pos_row.addStretch()
-        mode_lay.addLayout(sym_pos_row)
-
-        _use_sym_init = self._settings.value("legend/use_symbols", False, type=bool)
-        self.symbols_on_peaks_cb.setEnabled(_use_sym_init)
-        self.symbol_y_offset_spin.setEnabled(_use_sym_init)
-        self.symbol_size_spin.setEnabled(_use_sym_init)
-
-        self.mode_color_rb.toggled.connect(self._on_mode_changed)
-        lay.addWidget(mode_grp)
-
-        # ── Entries ──
-        entries_grp = QtWidgets.QGroupBox("Legend entries")
-        entries_grp_lay = QtWidgets.QVBoxLayout(entries_grp)
-        hint = QtWidgets.QLabel(
-            "One line per peak-list line, kept in sync with the Peaks window: "
-            "tick = shown (same tick) · ▲▼ reorder · colour, symbol, label and "
-            "column edit the peak list itself.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray; font-size: 10px;")
-        entries_grp_lay.addWidget(hint)
-
-        self._entries_container = QtWidgets.QWidget()
-        self._entries_layout = QtWidgets.QVBoxLayout(self._entries_container)
-        self._entries_layout.setContentsMargins(0, 0, 0, 0)
-        self._entries_layout.setSpacing(2)
-        entries_grp_lay.addWidget(self._entries_container)
-        lay.addWidget(entries_grp)
-
-        # ── Appearance ──
-        app_grp = QtWidgets.QGroupBox("Appearance")
-        app_form = QtWidgets.QFormLayout(app_grp)
-        app_form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-
-        font_row = QtWidgets.QHBoxLayout()
+        font_row = QtWidgets.QHBoxLayout(); font_row.setSpacing(6)
         self.font_combo = QtWidgets.QFontComboBox()
-        saved_fam = self._settings.value("legend/font_family", "")
-        if saved_fam:
-            self.font_combo.setCurrentFont(QtGui.QFont(saved_fam))
         self.font_combo.currentFontChanged.connect(self._apply)
         self.font_pt_spin = QtWidgets.QSpinBox()
         self.font_pt_spin.setRange(6, 48)
-        self.font_pt_spin.setValue(
-            self._settings.value("legend/font_pt", 11, type=int))
         self.font_pt_spin.setSuffix(" pt")
-        self.font_pt_spin.setFixedWidth(68)
         self.font_pt_spin.valueChanged.connect(self._apply)
-        font_row.addWidget(self.font_combo, 1)
-        font_row.addWidget(self.font_pt_spin)
-        app_form.addRow("Font:", font_row)
-
-        self.show_box_cb = QtWidgets.QCheckBox()
-        self.show_box_cb.setChecked(
-            self._settings.value("legend/show_box", True, type=bool))
-        self.show_box_cb.toggled.connect(self._apply)
-        app_form.addRow("Show legend box:", self.show_box_cb)
-
-        self.shadow_cb = QtWidgets.QCheckBox()
-        self.shadow_cb.setChecked(
-            self._settings.value("legend/shadow", False, type=bool))
-        self.shadow_cb.toggled.connect(self._apply)
-        app_form.addRow("Shadow:", self.shadow_cb)
-
-        self.rounded_cb = QtWidgets.QCheckBox()
-        self.rounded_cb.setChecked(
-            self._settings.value("legend/rounded", False, type=bool))
-        self.rounded_cb.toggled.connect(self._apply)
-        app_form.addRow("Rounded corners:", self.rounded_cb)
+        font_row.addWidget(self.font_combo, 1); font_row.addWidget(self.font_pt_spin)
+        look.addWidget(label("Font"), r, 0); look.addLayout(font_row, r, 1); r += 1
 
         self.ncols_spin = QtWidgets.QSpinBox()
         self.ncols_spin.setRange(1, 10)
-        self.ncols_spin.setValue(
-            self._settings.value("legend/ncols", 1, type=int))
         self.ncols_spin.valueChanged.connect(self._apply)
-        app_form.addRow("Columns:", self.ncols_spin)
+        cols_row = QtWidgets.QHBoxLayout(); cols_row.addWidget(self.ncols_spin)
+        cols_hint = QtWidgets.QLabel("each entry's column is set in the Entries tab")
+        cols_hint.setProperty("role", "muted")
+        cols_row.addWidget(cols_hint); cols_row.addStretch()
+        look.addWidget(label("Columns"), r, 0); look.addLayout(cols_row, r, 1); r += 1
 
-        self.legend_sym_size_spin = QtWidgets.QSpinBox()
-        self.legend_sym_size_spin.setRange(4, 40)
-        self.legend_sym_size_spin.setValue(
-            self._settings.value("legend/legend_symbol_size", 12, type=int))
-        self.legend_sym_size_spin.setSuffix(" px")
-        self.legend_sym_size_spin.setFixedWidth(68)
-        self.legend_sym_size_spin.setToolTip(
-            "Size of the symbols in the legend (Color + symbol mode).\n"
-            "The symbols drawn over peaks have their own size above.")
-        self.legend_sym_size_spin.valueChanged.connect(self._apply)
-        app_form.addRow("Symbol size:", self.legend_sym_size_spin)
+        box_row = QtWidgets.QHBoxLayout(); box_row.setSpacing(14)
+        self.show_box_cb = QtWidgets.QCheckBox("Box")
+        self.shadow_cb   = QtWidgets.QCheckBox("Shadow")
+        self.rounded_cb  = QtWidgets.QCheckBox("Rounded corners")
+        for w in (self.show_box_cb, self.shadow_cb, self.rounded_cb):
+            w.toggled.connect(self._apply)
+            box_row.addWidget(w)
+        box_row.addStretch()
+        look.addWidget(label("Frame"), r, 0); look.addLayout(box_row, r, 1); r += 1
 
-        size_row = QtWidgets.QHBoxLayout()
+        size_row = QtWidgets.QHBoxLayout(); size_row.setSpacing(4)
         self._wh_updating = False
         self._wh_ratio = None
         self.width_spin = QtWidgets.QSpinBox()
         self.width_spin.setRange(0, 1200)
-        self.width_spin.setValue(self._settings.value("legend/width", 0, type=int))
         self.width_spin.setSuffix(" px")
         self.width_spin.setSpecialValueText("Auto")
-        self.width_spin.setFixedWidth(90)
         self.width_spin.valueChanged.connect(self._on_width_changed)
         self.link_wh_btn = QtWidgets.QToolButton()
         self.link_wh_btn.setText("🔗")
         self.link_wh_btn.setCheckable(True)
         self.link_wh_btn.setAutoRaise(True)
         self.link_wh_btn.setToolTip("Keep the width / height ratio")
-        self.link_wh_btn.setChecked(self._settings.value("legend/wh_linked", False, type=bool))
         self.link_wh_btn.toggled.connect(self._on_link_toggled)
         self.height_spin = QtWidgets.QSpinBox()
         self.height_spin.setRange(0, 900)
-        self.height_spin.setValue(self._settings.value("legend/height", 0, type=int))
         self.height_spin.setSuffix(" px")
         self.height_spin.setSpecialValueText("Auto")
-        self.height_spin.setFixedWidth(90)
         self.height_spin.valueChanged.connect(self._on_height_changed)
-        size_row.addWidget(self.width_spin)
-        size_row.addWidget(self.link_wh_btn)
-        size_row.addWidget(self.height_spin)
+        size_row.addWidget(self.width_spin); size_row.addWidget(QtWidgets.QLabel("×"))
+        size_row.addWidget(self.height_spin); size_row.addWidget(self.link_wh_btn)
         size_row.addStretch()
-        app_form.addRow("Size W × H:", size_row)
+        look.addWidget(label("Size"), r, 0); look.addLayout(size_row, r, 1); r += 1
 
-        pos_row = QtWidgets.QHBoxLayout()
+        pos_row = QtWidgets.QHBoxLayout(); pos_row.setSpacing(8)
+        self.placement_combo = QtWidgets.QComboBox()
+        for key, text in LEGEND_PLACEMENTS:
+            self.placement_combo.addItem(text, key)
+        self.placement_combo.setToolTip(
+            "Auto puts the legend in the corner of the plot with the least data,\n"
+            "and moves it when you zoom or pan. Dragging the legend on the plot\n"
+            "places it by hand.")
+        self.placement_combo.activated.connect(self._on_placement_chosen)
+        pos_hint = QtWidgets.QLabel("or drag the legend on the plot")
+        pos_hint.setProperty("role", "muted")
+        pos_row.addWidget(self.placement_combo); pos_row.addWidget(pos_hint); pos_row.addStretch()
+        look.addWidget(label("Position"), r, 0); look.addLayout(pos_row, r, 1); r += 1
+        look.setColumnStretch(1, 1)
+        look.setRowStretch(r, 1)
+        tabs.addTab(look_page, "Look")
+
+        # Kept for the code that enables it when the legend is not in its
+        # default place; the placement box replaces it in the window.
         self.reset_pos_btn = QtWidgets.QPushButton("Reset position")
-        self.reset_pos_btn.setToolTip(
-            "Put the legend back in the top-right corner.\n"
-            "Drag the legend on the plot to move it.")
         self.reset_pos_btn.clicked.connect(self._reset_position)
-        pos_hint = QtWidgets.QLabel("drag the legend on the plot to move it")
-        pos_hint.setStyleSheet("color: gray; font-size: 10px;")
-        pos_row.addWidget(self.reset_pos_btn)
-        pos_row.addWidget(pos_hint)
-        pos_row.addStretch()
-        app_form.addRow("Position:", pos_row)
+        self.reset_pos_btn.hide()
 
-        lay.addWidget(app_grp)
-        lay.addStretch()
+        # ── Tab: Symbols on peaks ──
+        sop_page = QtWidgets.QWidget()
+        sop = QtWidgets.QGridLayout(sop_page)
+        sop.setContentsMargins(8, 10, 8, 8)
+        sop.setHorizontalSpacing(10); sop.setVerticalSpacing(8)
+        self.symbols_on_peaks_cb = QtWidgets.QCheckBox("Draw each list's symbol over its peaks")
+        self.symbols_on_peaks_cb.setToolTip(
+            "Draw the legend symbol directly on each highlighted peak in the main view.\n"
+            "Requires 'Colour + symbol'. Labels are shifted up automatically\n"
+            "to avoid overlapping the symbols.")
+        self.symbols_on_peaks_cb.toggled.connect(self._apply)
+        sop.addWidget(self.symbols_on_peaks_cb, 0, 0, 1, 2)
+        self.symbol_y_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.symbol_y_offset_spin.setRange(0.0, 1e9)       # no practical limit
+        self.symbol_y_offset_spin.setSingleStep(1.0)
+        self.symbol_y_offset_spin.setDecimals(1)
+        self.symbol_y_offset_spin.setSuffix(" %")
+        self.symbol_y_offset_spin.setToolTip(
+            "Height of the symbols above the peak tip, as a percentage of the peak\n"
+            "height (100 % = twice the peak). Works the same on linear and log\n"
+            "axes: on a log axis every peak gets the same visual gap.")
+        self.symbol_y_offset_spin.valueChanged.connect(self._apply)
+        sop.addWidget(label("Height above peak"), 1, 0)
+        sop.addWidget(self.symbol_y_offset_spin, 1, 1, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.symbol_size_spin = QtWidgets.QSpinBox()
+        self.symbol_size_spin.setRange(4, 40)
+        self.symbol_size_spin.setSuffix(" px")
+        self.symbol_size_spin.setToolTip("Diameter of the symbols drawn over peaks (pixels).")
+        self.symbol_size_spin.valueChanged.connect(self._apply)
+        sop.addWidget(label("Size"), 2, 0)
+        sop.addWidget(self.symbol_size_spin, 2, 1, QtCore.Qt.AlignmentFlag.AlignLeft)
+        self._sop_hint = QtWidgets.QLabel("Needs “Colour + symbol” (Look tab).")
+        self._sop_hint.setProperty("role", "muted")
+        sop.addWidget(self._sop_hint, 3, 0, 1, 2)
+        sop.setColumnStretch(1, 1)
+        sop.setRowStretch(4, 1)
+        tabs.addTab(sop_page, "Symbols on peaks")
 
-        # ── Right panel (preview) ──────────────────────────────────────
-        right = QtWidgets.QWidget()
-        right_lay = QtWidgets.QVBoxLayout(right)
-        right_lay.setContentsMargins(4, 4, 4, 4)
-        right_lay.setSpacing(4)
-        right_lay.addWidget(QtWidgets.QLabel("Preview (as in exports):"))
-        self._preview = LegendPreviewWidget()
-        right_lay.addWidget(self._preview, 1)
-        splitter.addWidget(right)
-        splitter.setSizes([620, 380])
+        self.mode_color_rb.toggled.connect(self._on_mode_changed)
+        self._load_from_settings()
+        _legend_settings_listeners.append(self._load_from_settings)
+        self.resize(720, 660)
+
+    def _load_from_settings(self):
+        """Show the current settings (also after a project was opened or the
+        sidebar's Legend card changed something)."""
+        try:
+            widgets = (self.show_cb, self.show_sources_cb, self.show_unticked_cb,
+                       self.mode_color_rb, self.mode_symbol_rb, self.legend_sym_size_spin,
+                       self.font_combo, self.font_pt_spin, self.ncols_spin,
+                       self.show_box_cb, self.shadow_cb, self.rounded_cb,
+                       self.width_spin, self.height_spin, self.link_wh_btn,
+                       self.symbols_on_peaks_cb, self.symbol_y_offset_spin, self.symbol_size_spin)
+            for w in widgets:
+                w.blockSignals(True)
+            g = _legend_setting
+            self.show_cb.setChecked(g("show"))
+            self.show_sources_cb.setChecked(g("show_sources"))
+            self.show_unticked_cb.setChecked(g("show_unticked"))
+            use_sym = g("use_symbols")
+            self.mode_symbol_rb.setChecked(use_sym)
+            self.mode_color_rb.setChecked(not use_sym)
+            self.legend_sym_size_spin.setValue(g("legend_symbol_size"))
+            if g("font_family"):
+                self.font_combo.setCurrentFont(QtGui.QFont(g("font_family")))
+            self.font_pt_spin.setValue(g("font_pt"))
+            self.ncols_spin.setValue(g("ncols"))
+            self.show_box_cb.setChecked(g("show_box"))
+            self.shadow_cb.setChecked(g("shadow"))
+            self.rounded_cb.setChecked(g("rounded"))
+            self.width_spin.setValue(g("width"))
+            self.height_spin.setValue(g("height"))
+            self.link_wh_btn.setChecked(g("wh_linked"))
+            self.symbols_on_peaks_cb.setChecked(g("symbols_on_peaks"))
+            self.symbol_y_offset_spin.setValue(100.0 * g("symbol_y_offset"))
+            self.symbol_size_spin.setValue(g("symbol_size"))
+            for w in widgets:
+                w.blockSignals(False)
+            self._set_symbol_controls_enabled(use_sym)
+            self._sync_placement_combo()
+            self._update_preview()
+        except RuntimeError:
+            pass        # closing
+
+    def _set_symbol_controls_enabled(self, use_sym):
+        self.symbols_on_peaks_cb.setEnabled(use_sym)
+        self.symbol_y_offset_spin.setEnabled(use_sym)
+        self.symbol_size_spin.setEnabled(use_sym)
+        self.legend_sym_size_spin.setEnabled(use_sym)
+        self._sop_hint.setVisible(not use_sym)
+
+    def _sync_placement_combo(self):
+        i = self.placement_combo.findData(_legend_placement())
+        self.placement_combo.blockSignals(True)
+        self.placement_combo.setCurrentIndex(max(i, 0))
+        self.placement_combo.blockSignals(False)
+
+    def _on_placement_chosen(self, _index):
+        key = self.placement_combo.currentData()
+        if key == "manual":
+            # Nothing dragged yet: keep the legend where it is now
+            if _peak_legend is not None:
+                _legend_anchor_at(_peak_legend, _peak_legend.pos(), save=True)
+        else:
+            settings.setValue("legend/placement", key)
+            _legend_auto_current[0] = None
+        _legend_settings_changed(source=self._load_from_settings)
 
     # ── Entries: always the current peak rows ───────────────────────────────
 
@@ -14209,7 +14789,7 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
             for w, e in zip(self._entry_widgets, entries):
                 w.update_from(e)
             self._update_preview()
-            self.reset_pos_btn.setEnabled(not _legend_at_default_position())
+            self._sync_placement_combo()
         except RuntimeError:
             pass    # widgets already deleted while the dialog closes
 
@@ -14309,10 +14889,10 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
         s.setValue("legend/symbols_on_peaks", self.symbols_on_peaks_cb.isChecked())
         s.setValue("legend/symbol_y_offset",  self.symbol_y_offset_spin.value() / 100.0)
         s.setValue("legend/symbol_size",      self.symbol_size_spin.value())
+        s.setValue("legend/show_sources",     self.show_sources_cb.isChecked())
         self._spectrum_legend.setLabelTextSize(f"{self.font_pt_spin.value()}pt")
         self._update_preview()
-        _rebuild_peak_legend_on_plot()
-        _render_peaks_or_full()
+        _legend_settings_changed(source=self._load_from_settings)
 
     # ── Size W × H (optionally linked) and position ──
 
@@ -14368,15 +14948,13 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
 
     def _reset_position(self):
         reset_legend_position()
-        self.reset_pos_btn.setEnabled(not _legend_at_default_position())
+        self._sync_placement_combo()
 
     def _on_mode_changed(self):
         use_sym = self.mode_symbol_rb.isChecked()
         for w in self._entry_widgets:
             w.set_symbol_visible(use_sym)
-        self.symbols_on_peaks_cb.setEnabled(use_sym)
-        self.symbol_y_offset_spin.setEnabled(use_sym)
-        self.symbol_size_spin.setEnabled(use_sym)
+        self._set_symbol_controls_enabled(use_sym)
         self._apply()
 
     def _fill_missing_symbols(self):
@@ -14413,6 +14991,7 @@ class LegendParametersDialog(QtWidgets.QWidget, StayOnTopMixin):
             width       = self.width_spin.value(),
             height      = self.height_spin.value(),
             symbol_size = self.legend_sym_size_spin.value(),
+            sources     = _legend_sources() if self.show_sources_cb.isChecked() else [],
         )
 
     # ── Saved labels ────────────────────────────────────────────────────────
@@ -14520,6 +15099,107 @@ def _open_legend_params():
     _legend_params_dialog.show()
 
 legend_params_action.triggered.connect(_open_legend_params)
+
+# ─────────────────────────────────────────────
+#  Sidebar: Legend card (the everyday settings; "More…" opens the window)
+# ─────────────────────────────────────────────
+legend_card, _lg_lay, _lg_head = _make_card("Legend", folded_default=True)
+_lg_more_btn = QtWidgets.QPushButton("More…")
+_lg_more_btn.setToolTip("All legend settings: entries, symbols, size, symbols on peaks…")
+_lg_more_btn.clicked.connect(_open_legend_params)
+_lg_head.addWidget(_lg_more_btn)
+
+_lg_show = QtWidgets.QCheckBox("Show on plot")
+_lg_sources = QtWidgets.QCheckBox("File names")
+_lg_sources.setToolTip("Name the spectra and the peak-list file at the bottom of the legend\n"
+                       "(on screen and in exports).")
+_lg_row1 = QtWidgets.QHBoxLayout(); _lg_row1.setSpacing(12)
+_lg_row1.addWidget(_lg_show); _lg_row1.addWidget(_lg_sources); _lg_row1.addStretch()
+_lg_lay.addLayout(_lg_row1)
+
+# Colour + symbol / colour only, as a two-button switch
+_lg_mode_sym = QtWidgets.QPushButton("Colour + symbol")
+_lg_mode_col = QtWidgets.QPushButton("Colour only")
+_lg_mode_group = QtWidgets.QButtonGroup(legend_card)
+for _b in (_lg_mode_sym, _lg_mode_col):
+    _b.setCheckable(True)
+    _b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+    _lg_mode_group.addButton(_b)
+_lg_mode_row = QtWidgets.QHBoxLayout(); _lg_mode_row.setSpacing(4)
+_lg_mode_row.addWidget(_lg_mode_sym, 1); _lg_mode_row.addWidget(_lg_mode_col, 1)
+_lg_lay.addLayout(_lg_mode_row)
+
+_lg_grid = QtWidgets.QGridLayout()
+_lg_grid.setHorizontalSpacing(8); _lg_grid.setVerticalSpacing(6)
+_lg_font_pt = QtWidgets.QSpinBox(); _lg_font_pt.setRange(6, 48); _lg_font_pt.setSuffix(" pt")
+_lg_ncols = QtWidgets.QSpinBox(); _lg_ncols.setRange(1, 10)
+_lg_font_pt.setMinimumWidth(76); _lg_ncols.setMinimumWidth(52)   # below their padded hint
+for _w in (_lg_font_pt, _lg_ncols):
+    _w.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+_lg_box = QtWidgets.QCheckBox("Box")
+_lg_place = QtWidgets.QComboBox()
+_lg_place.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+_lg_place.setMinimumContentsLength(8)
+for _k, _txt in LEGEND_PLACEMENTS:
+    _lg_place.addItem(_txt, _k)
+_lg_place.setToolTip("Auto: the corner with the least data, updated as you zoom or pan.\n"
+                     "Dragging the legend on the plot places it by hand.")
+_lg_grid.addWidget(QtWidgets.QLabel("Font"), 0, 0)
+_lg_grid.addWidget(_lg_font_pt, 0, 1)
+_lg_grid.addWidget(QtWidgets.QLabel("Columns"), 0, 2)
+_lg_grid.addWidget(_lg_ncols, 0, 3)
+_lg_grid.addWidget(QtWidgets.QLabel("Position"), 1, 0)
+_lg_grid.addWidget(_lg_place, 1, 1, 1, 3)
+_lg_grid.addWidget(_lg_box, 2, 0, 1, 2)
+_lg_grid.setColumnStretch(1, 1); _lg_grid.setColumnStretch(3, 1)
+_lg_lay.addLayout(_lg_grid)
+
+_lg_widgets = (_lg_show, _lg_sources, _lg_mode_sym, _lg_mode_col, _lg_font_pt, _lg_ncols,
+               _lg_box, _lg_place)
+
+def _legend_card_load():
+    for w in _lg_widgets:
+        w.blockSignals(True)
+    _lg_show.setChecked(_legend_setting("show"))
+    _lg_sources.setChecked(_legend_setting("show_sources"))
+    (_lg_mode_sym if _legend_setting("use_symbols") else _lg_mode_col).setChecked(True)
+    _lg_font_pt.setValue(_legend_setting("font_pt"))
+    _lg_ncols.setValue(_legend_setting("ncols"))
+    _lg_box.setChecked(_legend_setting("show_box"))
+    _lg_place.setCurrentIndex(max(0, _lg_place.findData(_legend_placement())))
+    for w in _lg_widgets:
+        w.blockSignals(False)
+
+def _legend_card_apply(*_):
+    settings.setValue("legend/show", _lg_show.isChecked())
+    settings.setValue("legend/show_sources", _lg_sources.isChecked())
+    settings.setValue("legend/use_symbols", _lg_mode_sym.isChecked())
+    settings.setValue("legend/font_pt", _lg_font_pt.value())
+    settings.setValue("legend/ncols", _lg_ncols.value())
+    settings.setValue("legend/show_box", _lg_box.isChecked())
+    _legend_settings_changed(source=_legend_card_load)
+
+def _legend_card_place(_i):
+    key = _lg_place.currentData()
+    if key == "manual":
+        if _peak_legend is not None:          # keep it where it is now
+            _legend_anchor_at(_peak_legend, _peak_legend.pos(), save=True)
+    else:
+        settings.setValue("legend/placement", key)
+        _legend_auto_current[0] = None
+    _legend_settings_changed(source=_legend_card_load)
+
+for _w in (_lg_show, _lg_sources, _lg_box):
+    _w.toggled.connect(_legend_card_apply)
+_lg_mode_sym.toggled.connect(_legend_card_apply)
+_lg_font_pt.valueChanged.connect(_legend_card_apply)
+_lg_ncols.valueChanged.connect(_legend_card_apply)
+_lg_place.activated.connect(_legend_card_place)
+_legend_card_load()
+_legend_settings_listeners.append(_legend_card_load)
+# Dragging the legend on the plot switches the position to "Dragged"
+_legend_listeners.append(lambda: _lg_place.setCurrentIndex(
+    max(0, _lg_place.findData(_legend_placement()))))
 
 # Restore saved mode
 _saved_thr_mode = settings.value("threshold_mode", "% of max intensity")
@@ -14668,6 +15348,7 @@ def _cycle_overlay(go_next):
 
 ctrl_filter = CtrlScrollFilter(main_win)
 app.installEventFilter(ctrl_filter)
+_theme.pause_during_restyle(ctrl_filter)
 
 # ─────────────────────────────────────────────
 #  Plot export helpers
@@ -15093,8 +15774,9 @@ def _null_anchor(item):
 
 def cleanup():
     global _peak_legend
-    settings.setValue("base_dir", base_dir)
-    save_session_state()
+    if not globals().get("_skip_session_save", [False])[0]:   # not over imported settings
+        settings.setValue("base_dir", base_dir)
+        save_session_state()
     settings.sync()   # flush all QSettings to disk before Qt tears down
     # Detach every GraphicsWidgetAnchor from its ViewBox parent before Qt
     # destroys the C++ ViewBox objects.  Without this, __geometryChanged fires
@@ -15128,13 +15810,11 @@ def cleanup():
 
 app.aboutToQuit.connect(cleanup)
 def _save_project_and_toast():
-    save_project()
-    if _current_project_path[0]:
+    if save_project():
         _show_toast(f"Project saved: {os.path.basename(_current_project_path[0])}")
 
 def _save_project_as_and_toast():
-    save_project_as()
-    if _current_project_path[0]:
+    if save_project_as():
         _show_toast(f"Project saved as: {os.path.basename(_current_project_path[0])}")
 
 save_project_action.triggered.connect(_save_project_and_toast)
@@ -15534,10 +16214,12 @@ _peaks_dock_follower = _PeaksDockFollower()
 peaks_win.installEventFilter(_peaks_dock_follower)
 
 
-def _set_peaks_docked(docked):
+def _set_peaks_docked(docked, show=False):
+    """Dock / undock the peaks list. `show` opens it too (when the user asks
+    for it: docking a closed list used to change nothing visible)."""
     settings.setValue("peaks_docked", docked)
     _peaks_docked[0] = docked
-    was_open = peaks_win.isVisible() or not peaks_win.isHidden()
+    was_open = show or peaks_win.isVisible() or not peaks_win.isHidden()
     if docked:
         _pd_scroll.setWidget(peaks_win)               # reparents: no longer a window
         peaks_rows_scroll.setMinimumHeight(110)
@@ -15580,15 +16262,259 @@ _themed_icons.set(peaks_dock_action, "dock")
 peaks_menu.insertAction(peaks_menu.actions()[1], peaks_dock_action)
 pw_file_menu.addSeparator()
 pw_file_menu.addAction(peaks_dock_action)
-main_toolbar.insertAction(legend_params_action, peaks_dock_action)
+_tb(peaks_dock_action, "dock", "Dock peaks",
+    "Show the peak lists inside this window, below the plot, instead of in their own window.",
+    id="dock_peaks", group="Peaks & analysis", after="peaks")
+_rebuild_main_toolbar()
 peaks_dock_action.setChecked(settings.value("peaks_docked", False, type=bool))
 if peaks_dock_action.isChecked():
     peaks_win.hide()
     _set_peaks_docked(True)
-peaks_dock_action.toggled.connect(_set_peaks_docked)
+peaks_dock_action.toggled.connect(lambda v: _set_peaks_docked(v, show=True))
+
+# ─────────────────────────────────────────────
+#  Help → Edit Toolbar…
+# ─────────────────────────────────────────────
+class ToolbarEditor(QtWidgets.QDialog):
+    """Tick the tools to show on the main toolbar. Changes apply at once and
+    are saved ("toolbar/items"), so they are kept for the next sessions."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Toolbar")
+        self.resize(460, 620)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        intro = QtWidgets.QLabel("Choose the tools shown on the toolbar. Everything stays "
+                                 "available in the menus.")
+        intro.setWordWrap(True)
+        intro.setProperty("role", "muted")
+        lay.addWidget(intro)
+
+        self._list = QtWidgets.QTreeWidget()
+        self._list.setHeaderHidden(True)
+        self._list.setRootIsDecorated(False)
+        self._list.setIconSize(QtCore.QSize(18, 18))
+        self._list.setIndentation(8)
+        lay.addWidget(self._list, 1)
+        self._items = {}
+        choices = _toolbar_choices()
+        for group in _TOOLBAR_GROUPS:
+            tools = [it for it in _TOOLBAR_ITEMS if it["group"] == group]
+            if not tools:
+                continue
+            head = QtWidgets.QTreeWidgetItem(self._list, [group.upper()])
+            head.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            f = head.font(0); f.setBold(True); f.setPointSizeF(f.pointSizeF() * 0.85)
+            head.setFont(0, f)
+            head.setForeground(0, QtGui.QBrush(QtGui.QColor(_theme.tokens()["muted"])))
+            for it in tools:
+                row = QtWidgets.QTreeWidgetItem(head, [it["title"]])
+                row.setIcon(0, _icon(it["icon"]))
+                row.setToolTip(0, it["text"])
+                row.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled
+                             | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                row.setCheckState(0, QtCore.Qt.CheckState.Checked if choices[it["id"]]
+                                  else QtCore.Qt.CheckState.Unchecked)
+                self._items[it["id"]] = row
+        self._list.expandAll()
+        self._list.itemChanged.connect(self._save)
+
+        btns = QtWidgets.QHBoxLayout()
+        reset = QtWidgets.QPushButton("Reset to default")
+        reset.clicked.connect(self._reset)
+        close = QtWidgets.QPushButton("Close")
+        close.setProperty("role", "primary")
+        close.clicked.connect(self.accept)
+        btns.addWidget(reset); btns.addStretch(); btns.addWidget(close)
+        lay.addLayout(btns)
+
+    def _save(self, *_):
+        settings.setValue("toolbar/items", json.dumps(
+            {k: row.checkState(0) == QtCore.Qt.CheckState.Checked
+             for k, row in self._items.items()}))
+        _rebuild_main_toolbar()
+
+    def _reset(self):
+        settings.remove("toolbar/items")
+        choices = _toolbar_choices()
+        self._list.blockSignals(True)
+        for k, row in self._items.items():
+            row.setCheckState(0, QtCore.Qt.CheckState.Checked if choices[k]
+                              else QtCore.Qt.CheckState.Unchecked)
+        self._list.blockSignals(False)
+        _rebuild_main_toolbar()
+
+
+_toolbar_editor = [None]
+
+def open_toolbar_editor():
+    if _toolbar_editor[0] is None:
+        _toolbar_editor[0] = ToolbarEditor(main_win)
+    _toolbar_editor[0].show()
+    _toolbar_editor[0].raise_()
+    _toolbar_editor[0].activateWindow()
+
+edit_toolbar_action = QtWidgets.QAction("Edit Toolbar…", main_win)
+_themed_icons.set(edit_toolbar_action, "toolbar")
+edit_toolbar_action.triggered.connect(open_toolbar_editor)
+
+def _toolbar_context_menu(pos):
+    menu = QtWidgets.QMenu(main_toolbar)
+    menu.addAction(edit_toolbar_action)
+    menu.exec(main_toolbar.mapToGlobal(pos))
+
+
+# ─────────────────────────────────────────────
+#  Help → Export / Import Settings…  (e.g. to set up another computer)
+# ─────────────────────────────────────────────
+# All of Droplet's QSettings, plus the saved legend labels kept in ~/.droplet.
+# Folders, files and the last session are paths on this computer: they are
+# only included when asked for.
+_SETTINGS_FILE_FORMAT = "droplet-settings"
+_SESSION_KEYS = ("base_dir", "recent_folders", "recent_files", "virtual_folders",
+                 "last_peak_file", "peak_session", "saved_peak_files", "session_state",
+                 "last_project_path", "dialog_dir")
+_DROPLET_DIR_FILES = ("legend_labels.json", "legend_extra_entries.json",
+                      "legend_current_entries.json")
+
+def _is_session_key(key):
+    return any(key == k or key.startswith(k + "/") or key.startswith(k + "_")
+               for k in _SESSION_KEYS)
+
+def _settings_value_to_json(v):
+    if isinstance(v, (bool, int, float, str)) or v is None:
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_settings_value_to_json(x) for x in v]
+    if isinstance(v, QtCore.QByteArray):
+        return {"__bytes__": bytes(v.toBase64()).decode("ascii")}
+    return str(v)
+
+def _settings_value_from_json(v):
+    if isinstance(v, dict) and "__bytes__" in v:
+        return QtCore.QByteArray.fromBase64(v["__bytes__"].encode("ascii"))
+    if isinstance(v, list):
+        return [_settings_value_from_json(x) for x in v]
+    return v
+
+def export_settings():
+    box = QtWidgets.QMessageBox(main_win)
+    box.setWindowTitle("Export Settings")
+    box.setText("Save all of Droplet's settings to a file, to import them on another "
+                "computer (Help → Import Settings…) or after reinstalling.")
+    box.setInformativeText("Includes the display, legend, toolbar, processing and window "
+                           "settings, and your saved legend labels.")
+    cb = QtWidgets.QCheckBox("Also include recent folders and files and the last session\n"
+                             "(paths on this computer)")
+    box.setCheckBox(cb)
+    box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Save
+                           | QtWidgets.QMessageBox.StandardButton.Cancel)
+    if box.exec() != QtWidgets.QMessageBox.StandardButton.Save:
+        return
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        main_win, "Export Settings",
+        os.path.join(_get_dialog_dir("settings_export"), "droplet_settings.json"),
+        "Droplet settings (*.json)")
+    if not path:
+        return
+    _set_dialog_dir("settings_export", os.path.dirname(path))    # the file is not there yet
+    _save_peak_session()
+    save_session_state()
+    settings.sync()
+    data = {k: _settings_value_to_json(settings.value(k)) for k in settings.allKeys()
+            if cb.isChecked() or not _is_session_key(k)}
+    files = {}
+    for name in _DROPLET_DIR_FILES:
+        f = Path.home() / ".droplet" / name
+        if f.is_file():
+            try:
+                files[name] = f.read_text(encoding="utf-8")
+            except OSError:
+                pass
+    doc = {"format": _SETTINGS_FILE_FORMAT, "format_version": 1,
+           "droplet_version": APP_VERSION, "exported": datetime.now().isoformat(timespec="seconds"),
+           "settings": data, "droplet_files": files}
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError as e:
+        QtWidgets.QMessageBox.warning(main_win, "Export Settings", f"Could not save:\n{e}")
+        return
+    _show_toast(f"{len(data)} settings exported to {os.path.basename(path)}")
+
+_skip_session_save = [False]     # imported session keys must not be overwritten on exit
+
+def import_settings():
+    path, _ = QtWidgets.QFileDialog.getOpenFileName(
+        main_win, "Import Settings", _get_dialog_dir("settings_export"),
+        "Droplet settings (*.json)")
+    if not path:
+        return
+    _set_dialog_dir("settings_export", path)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+        if doc.get("format") != _SETTINGS_FILE_FORMAT:
+            raise ValueError("this is not a Droplet settings file")
+        data = doc["settings"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        QtWidgets.QMessageBox.warning(main_win, "Import Settings", f"Could not read the file:\n{e}")
+        return
+    answer = QtWidgets.QMessageBox.question(
+        main_win, "Import Settings",
+        f"Replace your settings with the {len(data)} settings in\n{os.path.basename(path)}\n"
+        f"(exported from Droplet {doc.get('droplet_version', '?')} on "
+        f"{doc.get('exported', '?')})?\n\nSettings not in the file are kept.",
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+    if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+        return
+    for k, v in data.items():
+        settings.setValue(k, _settings_value_from_json(v))
+    settings.sync()
+    folder = Path.home() / ".droplet"
+    for name, text in (doc.get("droplet_files") or {}).items():
+        if name in _DROPLET_DIR_FILES:
+            try:
+                folder.mkdir(exist_ok=True)
+                (folder / name).write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+    if any(_is_session_key(k) for k in data):
+        _skip_session_save[0] = True
+    # What can change right away does; the rest is read when Droplet starts
+    _rebuild_main_toolbar()
+    (dark_action if settings.value("display_mode", "bright") == "dark" else bright_action).trigger()
+    _legend_settings_changed()
+    restart = QtWidgets.QMessageBox.question(
+        main_win, "Import Settings",
+        "Settings imported. Restart Droplet now so that all of them apply?",
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+    if restart == QtWidgets.QMessageBox.StandardButton.Yes:
+        _skip_session_save[0] = True
+        QtCore.QProcess.startDetached(sys.executable, [os.path.abspath(sys.argv[0])] + sys.argv[1:])
+        app.quit()
+
+export_settings_action = QtWidgets.QAction("Export Settings…", main_win)
+import_settings_action = QtWidgets.QAction("Import Settings…", main_win)
+_themed_icons.set(export_settings_action, "export")
+_themed_icons.set(import_settings_action, "settings")
+export_settings_action.setToolTip("Save all settings to a file, e.g. to set up another computer")
+import_settings_action.setToolTip("Load settings saved with Export Settings…")
+export_settings_action.triggered.connect(export_settings)
+import_settings_action.triggered.connect(import_settings)
+
+# Help menu: after "Keyboard Shortcuts"
+_help_after = help_menu.actions()[help_menu.actions().index(help_shortcuts_action) + 1]
+help_menu.insertAction(_help_after, edit_toolbar_action)
+help_menu.insertSeparator(_help_after)
+help_menu.insertAction(_help_after, export_settings_action)
+help_menu.insertAction(_help_after, import_settings_action)
+help_menu.setToolTipsVisible(True)
 
 main_win.setWindowTitle(f"Droplet  {APP_VERSION}")
 main_win.resize(1400, 780)
+QtCore.QTimer.singleShot(0, _sidebar_restore)      # once the window has its size
 splash_step(96, "Drawing the plot…")
 main_win.show()
 QtCore.QTimer.singleShot(6000, finish_splash)   # never keep the start-up screen longer
