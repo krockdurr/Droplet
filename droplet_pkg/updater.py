@@ -9,6 +9,7 @@ Run from the Droplet installation folder, with Droplet's own Python:
     .venv/bin/python -m droplet_pkg.updater --yes      # update without asking
     .venv/bin/python -m droplet_pkg.updater --console  # terminal, no window
     .venv/bin/python -m droplet_pkg.updater --if-outdated  # silent unless outdated
+    .venv/bin/python -m droplet_pkg.updater --from-droplet # started by Droplet
 
 Run it with -m rather than as a file path: as a script, droplet_pkg/ would
 be first on sys.path and its subpackages (io/, …) would shadow the stdlib.
@@ -27,19 +28,26 @@ What it does
      • otherwise  → downloads the branch ZIP, backs up every file/folder it
                     is about to overwrite to droplet_backup_YYYYMMDD_HHMMSS/,
                     then copies the new files in.
+5. If requirements.txt / requirements_new.txt changed, installs the new
+   packages into the .venv the same way the installers do.  The launchers
+   (menu shortcut, Droplet.app, desktop shortcut) only point at the .venv
+   and Droplet.py, so they keep working and the installer need not be rerun.
+6. Offers to restart Droplet.  Started with --from-droplet, the updater just
+   exits with RESTART_EXIT_CODE and Droplet restarts itself (so it can close
+   its windows properly); otherwise the updater starts Droplet itself.
 
 Use from Droplet
 ----------------
 Droplet runs this module as a separate process (droplet_pkg/ui/update_checker.py),
 so the update never replaces code inside the running application:
-  • on startup                → -m droplet_pkg.updater --if-outdated
-  • Help → Check for Updates… → -m droplet_pkg.updater
+  • on startup                → -m droplet_pkg.updater --if-outdated --from-droplet
+  • Help → Check for Updates… → -m droplet_pkg.updater --from-droplet
 
 The logic itself is split into two UI-independent steps:
 
     plan = check_for_update()      # network only, changes nothing
     plan.needed / plan.describe()  # show this to the user
-    apply_update(plan, log=...)    # does the update, raises UpdateError
+    apply_update(plan, log=..., step=...)  # does the update, raises UpdateError
 """
 
 import argparse
@@ -70,6 +78,11 @@ VERSION_FILE  = ROOT / VERSION_PATH
 # repository root.
 REMOTE_VERSION_PATHS = (VERSION_PATH, "VERSION")
 BACKUP_PREFIX = "droplet_backup_"
+REQ_DIR       = ROOT / "assets" / "assimilation_guides"
+# Same order as the installers: pinned set first, newer pins as fallback.
+REQ_FILES     = ("requirements.txt", "requirements_new.txt")
+# Exit code telling Droplet (which started the updater) to restart itself.
+RESTART_EXIT_CODE = 75
 
 # Top-level entries the ZIP update never touches.
 PROTECTED = {".git", ".venv", "previous_versions"}
@@ -80,8 +93,24 @@ REPLACED_DIRS = {"droplet_pkg"}
 Log = Callable[[str], None]
 
 
+def _no_step(_: str):
+    pass
+
+
 class UpdateError(Exception):
-    """Raised when checking for or applying an update fails."""
+    """Raised when checking for or applying an update fails.
+
+    `user_message`, when set, is what the window shows instead of the
+    generic "nothing was changed" text (str(exc) goes into the details).
+    """
+
+    def __init__(self, message: str, user_message: str | None = None):
+        super().__init__(message)
+        self.user_message = user_message
+
+
+class DependencyError(UpdateError):
+    """The code was updated, but installing the new Python packages failed."""
 
 
 # ── versions ──────────────────────────────────────────────────────────────────
@@ -316,11 +345,13 @@ def _install(src_root: Path, entries: list[Path]):
             shutil.copy2(item, dest)
 
 
-def update_via_zip(plan: UpdatePlan, log: Log):
+def update_via_zip(plan: UpdatePlan, log: Log, step: Log = _no_step):
     with tempfile.TemporaryDirectory() as tmp:
         # Download first, so a network failure leaves the install untouched.
+        step("Downloading the new version …")
         src_root = _download_release(plan.branch, Path(tmp), log)
         entries = _entries_to_install(src_root)
+        step("Installing …")
         try:
             backup = backup_entries([e.name for e in entries], log)
         except Exception as exc:
@@ -330,39 +361,138 @@ def update_via_zip(plan: UpdatePlan, log: Log):
         try:
             _install(src_root, entries)
         except Exception as exc:
+            restore = (f"The previous files are in {backup.name}/ — copy "
+                       f"them back into {ROOT} to restore.")
             raise UpdateError(
-                f"Copying failed: {exc}\n"
-                f"The previous files are in {backup.name}/ — copy them back "
-                f"into {ROOT} to restore.") from exc
+                f"Copying failed: {exc}\n{restore}",
+                user_message=f"Droplet could not finish installing the new "
+                             f"files. {restore}") from exc
 
 
-def apply_update(plan: UpdatePlan, log: Log = print):
-    """Perform the update described by `plan`.  Raises UpdateError on failure."""
+# ── step 3: Python packages ───────────────────────────────────────────────────
+
+def _requirements() -> dict[str, bytes | None]:
+    return {name: (REQ_DIR / name).read_bytes() if (REQ_DIR / name).exists()
+            else None for name in REQ_FILES}
+
+
+def venv_python() -> Path | None:
+    """Python of the .venv the installers create, or None if there is none."""
+    for rel in (".venv/bin/python", ".venv/Scripts/python.exe"):
+        if (ROOT / rel).exists():
+            return ROOT / rel
+    return None
+
+
+def update_dependencies(log: Log, step: Log = _no_step):
+    """Install requirements into the .venv, exactly like the installers do."""
+    python = venv_python()
+    if python is None:
+        log("No .venv in the Droplet folder, Python packages left as they are.")
+        return
+    step("Updating Python packages … (this can take a few minutes)")
+    # Without this, every pip call opens a console window on Windows.
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    def pip_install(*args: str) -> bool:
+        log("pip install " + " ".join(args))
+        try:
+            result = subprocess.run(
+                [str(python), "-m", "pip", "install",
+                 "--disable-pip-version-check", *args],
+                capture_output=True, text=True, timeout=1800, creationflags=flags)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log(str(exc))
+            return False
+        for out in (result.stdout, result.stderr):
+            if out.strip():
+                log(out.strip())
+        return result.returncode == 0
+
+    primary, newer = (REQ_DIR / name for name in REQ_FILES)
+    # --only-binary fails fast when a pin has no wheel for this Python, so the
+    # newer pins get their turn instead of a long source build.
+    if primary.exists() and pip_install("--only-binary=:all:", "-r", str(primary)):
+        return
+    if newer.exists() and pip_install("-r", str(newer)):
+        return
+    raise DependencyError(
+        "pip could not install requirements.txt or requirements_new.txt.",
+        user_message="Droplet was updated, but the Python packages it needs "
+                     "could not be installed. Check your internet connection "
+                     "and try again.")
+
+
+def apply_update(plan: UpdatePlan, log: Log = print, step: Log = _no_step):
+    """Perform the update described by `plan`.  Raises UpdateError on failure.
+
+    `log` gets technical progress lines, `step` short ones meant for anyone.
+    """
     if not plan.needed:
         log("Already up to date. Nothing to do.")
         return
     if plan.blocker:
         raise UpdateError(plan.blocker)
+    before = _requirements()
     if plan.method == "git":
+        step("Downloading the new version …")
         update_via_git(log)
     else:
-        update_via_zip(plan, log)
+        update_via_zip(plan, log, step)
 
     installed = local_version()
     if is_newer(plan.remote_version, installed):
         raise UpdateError(f"Update finished but VERSION still says {installed} "
                           f"(expected {plan.remote_version}).")
+    if _requirements() != before:
+        update_dependencies(log, step)
+    else:
+        log("Python packages unchanged.")
     log(f"Update complete. Droplet is now at version {installed}.")
 
 
-AFTER_UPDATE = ("Run the installer for your system again so the dependencies "
-                "and launcher match the new version, then restart Droplet.")
+# ── step 4: restart ───────────────────────────────────────────────────────────
+
+def _mac_app() -> Path | None:
+    """~/Applications/Droplet.app, if its launcher opens this folder."""
+    app = Path.home() / "Applications" / "Droplet.app"
+    try:
+        launcher = (app / "Contents" / "MacOS" / "Droplet").read_text()
+    except OSError:
+        return None
+    return app if f'DROPLET_DIR="{ROOT}"' in launcher else None
+
+
+def launch_droplet():
+    """Start a new Droplet, detached from this process, the way its launcher
+    would (on macOS through Droplet.app, so its log file keeps working)."""
+    app = _mac_app() if sys.platform == "darwin" else None
+    if app is not None:
+        # -n: a new instance even though the closing one is still running.
+        subprocess.Popen(["open", "-n", str(app)])
+        return
+    python = venv_python() or Path(sys.executable)
+    cmd = [str(python), str(ROOT / "Droplet.py")]
+    if sys.platform == "win32":
+        pythonw = python.with_name("pythonw.exe")
+        if pythonw.exists():
+            cmd[0] = str(pythonw)
+        subprocess.Popen(cmd, cwd=str(ROOT), close_fds=True,
+                         creationflags=subprocess.DETACHED_PROCESS
+                         | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        subprocess.Popen(cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                         start_new_session=True)
 
 
 # ── Qt front-end ──────────────────────────────────────────────────────────────
 
+NOTHING_CHANGED = ("Nothing was changed, so your current version still works. "
+                   "Check your internet connection and try again.")
+
+
 def run_gui(check_only: bool = False, auto_confirm: bool = False,
-            if_outdated: bool = False) -> int:
+            if_outdated: bool = False, from_droplet: bool = False) -> int:
     """Show the updater window.  Raises ImportError if no Qt binding exists.
 
     With `if_outdated`, the check runs first without any window, and the
@@ -384,10 +514,11 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False,
     Signal = getattr(QtCore, "pyqtSignal", None) or QtCore.Signal
 
     class _Task(QtCore.QThread):
-        """Runs fn(log) off the GUI thread; results come back as signals."""
+        """Runs fn(log, step) off the GUI thread; results come back as signals."""
         log       = Signal(str)
+        step      = Signal(str)
         succeeded = Signal(object)
-        failed    = Signal(str)
+        failed    = Signal(object)  # the exception
 
         def __init__(self, fn, parent=None):
             super().__init__(parent)
@@ -395,151 +526,242 @@ def run_gui(check_only: bool = False, auto_confirm: bool = False,
 
         def run(self):
             try:
-                self.succeeded.emit(self._fn(self.log.emit))
+                self.succeeded.emit(self._fn(self.log.emit, self.step.emit))
             except UpdateError as exc:
-                self.failed.emit(str(exc))
+                self.failed.emit(exc)
             except Exception as exc:
-                self.failed.emit(f"Unexpected error: {exc}")
+                self.failed.emit(UpdateError(f"Unexpected error: {exc}"))
 
     class UpdaterDialog(QtWidgets.QDialog):
+        """One screen at a time: an icon, a title, one or two plain sentences,
+        and at most two buttons.  Technical output sits behind "Show details"."""
+
         def __init__(self, plan: UpdatePlan | None = None):
             super().__init__()
-            self.setWindowTitle("Droplet Updater")
-            icon = ROOT / "assets" / "icons" / "Droplet_Icon.png"
-            if icon.exists():
-                self.setWindowIcon(QtGui.QIcon(str(icon)))
+            self.setWindowTitle("Droplet Update")
+            icon_path = ROOT / "assets" / "icons" / "Droplet_Icon.png"
+            if icon_path.exists():
+                self.setWindowIcon(QtGui.QIcon(str(icon_path)))
             self.exit_code = 0
             self._plan: UpdatePlan | None = None
             self._task: _Task | None = None
+            self._on_primary = self._on_secondary = None
 
-            lay = QtWidgets.QVBoxLayout(self)
-            lay.setSpacing(10)
+            outer = QtWidgets.QVBoxLayout(self)
+            outer.setContentsMargins(24, 22, 24, 18)
+            outer.setSpacing(16)
             # Window always fits its content as messages change.
-            lay.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
+            outer.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
 
+            top = QtWidgets.QHBoxLayout()
+            top.setSpacing(18)
+            icon = QtWidgets.QLabel()
+            if icon_path.exists():
+                pix = QtGui.QPixmap(str(icon_path))
+                dpr = self.devicePixelRatioF()
+                pix = pix.scaled(int(56 * dpr), int(56 * dpr),
+                                 QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                                 QtCore.Qt.TransformationMode.SmoothTransformation)
+                pix.setDevicePixelRatio(dpr)
+                icon.setPixmap(pix)
+            icon.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+            top.addWidget(icon, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+
+            text = QtWidgets.QVBoxLayout()
+            text.setSpacing(8)
             self._title = QtWidgets.QLabel()
-            self._title.setStyleSheet("font-size: 14px; font-weight: bold;")
-            lay.addWidget(self._title)
+            font = self._title.font()
+            font.setPointSizeF(font.pointSizeF() * 1.35)
+            font.setBold(True)
+            self._title.setFont(font)
+            self._title.setWordWrap(True)
+            text.addWidget(self._title)
 
             self._message = QtWidgets.QLabel()
             self._message.setWordWrap(True)
-            self._message.setMinimumWidth(500)
+            self._message.setFixedWidth(340)
             self._message.setTextInteractionFlags(
                 QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-            lay.addWidget(self._message)
+            text.addWidget(self._message)
+
+            self._progress = QtWidgets.QProgressBar()
+            self._progress.setRange(0, 0)  # indeterminate
+            self._progress.setTextVisible(False)
+            self._progress.setFixedHeight(6)
+            text.addWidget(self._progress)
+            top.addLayout(text)
+            outer.addLayout(top)
 
             self._log = QtWidgets.QPlainTextEdit()
             self._log.setReadOnly(True)
             self._log.setFont(QtGui.QFontDatabase.systemFont(
                 QtGui.QFontDatabase.SystemFont.FixedFont))
-            self._log.setMinimumSize(500, 160)
+            self._log.setFixedSize(414, 150)
             self._log.hide()
-            lay.addWidget(self._log)
-
-            self._progress = QtWidgets.QProgressBar()
-            self._progress.setRange(0, 0)  # indeterminate
-            self._progress.setTextVisible(False)
-            lay.addWidget(self._progress)
+            outer.addWidget(self._log)
 
             buttons = QtWidgets.QHBoxLayout()
+            self._details = QtWidgets.QPushButton("Show details")
+            self._details.setFlat(True)
+            self._details.clicked.connect(self._toggle_details)
+            self._details.hide()
+            buttons.addWidget(self._details)
             buttons.addStretch()
+            self._secondary = QtWidgets.QPushButton()
+            self._secondary.clicked.connect(lambda: self._on_secondary())
             self._primary = QtWidgets.QPushButton()
-            self._primary.clicked.connect(self._on_primary)
-            self._close = QtWidgets.QPushButton("Cancel")
-            self._close.clicked.connect(self.reject)
-            buttons.addWidget(self._primary)
-            buttons.addWidget(self._close)
-            lay.addLayout(buttons)
+            self._primary.setProperty("role", "primary")
+            self._primary.clicked.connect(lambda: self._on_primary())
+            for b in (self._secondary, self._primary):
+                b.setMinimumWidth(96)
+                buttons.addWidget(b)
+            outer.addLayout(buttons)
 
             if plan is None:
                 self._start_check()
             else:
                 self._on_checked(plan)
 
-        # ── state changes ──
+        # ── layout of one screen ──
 
-        def _busy(self, busy: bool):
+        def _show(self, title: str, message: str, primary=None, secondary=None,
+                  busy: bool = False):
+            """primary / secondary: (label, callback) or None to hide."""
+            self._title.setText(title)
+            self._message.setText(message)
             self._progress.setVisible(busy)
-            self._primary.setEnabled(not busy)
-            self._close.setEnabled(not busy)
+            for button, spec, attr in ((self._primary, primary, "_on_primary"),
+                                       (self._secondary, secondary, "_on_secondary")):
+                button.setVisible(spec is not None)
+                if spec is not None:
+                    button.setText(spec[0])
+                    setattr(self, attr, spec[1])
+            if primary is not None:
+                self._primary.setDefault(True)
+                self._primary.setFocus()
+            elif secondary is not None:
+                self._secondary.setDefault(True)
+                self._secondary.setFocus()
+
+        def _close_with(self, code: int):
+            self.exit_code = code
+            self.accept()
 
         def _run(self, fn, on_success, on_failure):
             self._task = _Task(fn, self)
             self._task.log.connect(self._append_log)
+            self._task.step.connect(self._message.setText)
             self._task.succeeded.connect(on_success)
             self._task.failed.connect(on_failure)
-            self._busy(True)
             self._task.start()
 
+        # ── checking ──
+
         def _start_check(self):
-            self._title.setText("Checking for updates …")
-            self._message.setText(f"Contacting github.com/{GITHUB_REPO} …")
-            self._primary.hide()
-            self._run(lambda log: check_for_update(),
+            self._show("Checking for updates …", "This only takes a moment.",
+                       busy=True)
+            self._run(lambda log, step: check_for_update(),
                       self._on_checked, self._on_check_failed)
 
         def _on_checked(self, plan: UpdatePlan):
-            self._busy(False)
             self._plan = plan
-            self._message.setText(plan.describe())
+            new, old = plan.remote_version, plan.local_version
             if not plan.needed:
-                self._title.setText("Droplet is up to date")
-                self._close.setText("Close")
+                self._show("Droplet is up to date",
+                           f"You have the latest version ({old}).",
+                           primary=("OK", self.accept))
             elif plan.blocker:
-                self._title.setText("Update available")
-                self._close.setText("Close")
                 self.exit_code = 1
+                self._show("A new version is available",
+                           f"Version {new} is out, but this copy of Droplet "
+                           f"can't update itself: {plan.blocker}",
+                           secondary=("Close", self.reject))
             elif check_only:
-                self._title.setText("Update available")
-                self._close.setText("Close")
+                self._show("A new version is available",
+                           f"Version {new} is ready to install. "
+                           f"You have version {old}.",
+                           secondary=("Close", self.reject))
             else:
-                self._title.setText("Update available")
-                self._primary.setText("Update")
-                self._primary.show()
-                self._primary.setDefault(True)
-                self._close.setText("Cancel")
+                self._show("A new version is available",
+                           f"Version {new} is ready to install. You have "
+                           f"version {old}.\n\nYour settings are kept.",
+                           primary=("Update", self._start_update),
+                           secondary=("Not now", self.reject))
                 if auto_confirm:
                     self._start_update()
 
-        def _on_check_failed(self, msg: str):
-            self._busy(False)
+        def _on_check_failed(self, exc: UpdateError):
             self.exit_code = 1
-            self._title.setText("Could not check for updates")
-            self._message.setText(msg)
-            self._primary.setText("Retry")
-            self._primary.show()
-            self._close.setText("Close")
+            self._append_log(str(exc))
+            self._show("Couldn't check for updates",
+                       "Make sure you're connected to the internet, "
+                       "then try again.",
+                       primary=("Try again", self._retry_check),
+                       secondary=("Close", self.reject))
 
-        def _on_primary(self):
-            if self._plan is not None and self._plan.needed:
-                self._start_update()
-            else:
-                self.exit_code = 0
-                self._start_check()
+        def _retry_check(self):
+            self.exit_code = 0
+            self._start_check()
+
+        # ── updating ──
 
         def _start_update(self):
-            self._title.setText(f"Updating to {self._plan.remote_version} …")
-            self._log.show()
-            self._primary.hide()
-            self._run(lambda log: apply_update(self._plan, log),
+            self._show(f"Updating Droplet to {self._plan.remote_version} …",
+                       "Starting …", busy=True)
+            self._run(lambda log, step: apply_update(self._plan, log, step),
+                      self._on_updated, self._on_update_failed)
+
+        def _retry_packages(self):
+            self._show("Finishing the update …", "Starting …", busy=True)
+            self._run(update_dependencies,
                       self._on_updated, self._on_update_failed)
 
         def _on_updated(self, _):
-            self._busy(False)
             self.exit_code = 0
-            self._title.setText("Update complete")
-            self._message.setText(AFTER_UPDATE)
-            self._close.setText("Close")
+            version = local_version()
+            if from_droplet:
+                self._show("Droplet has been updated",
+                           f"Restart Droplet to start using version {version}.",
+                           primary=("Restart", lambda: self._close_with(
+                               RESTART_EXIT_CODE)),
+                           secondary=("Later", self.accept))
+            else:
+                self._show("Droplet has been updated",
+                           f"Version {version} is installed and ready to use.",
+                           primary=("Open Droplet", self._open_droplet),
+                           secondary=("Close", self.accept))
 
-        def _on_update_failed(self, msg: str):
-            self._busy(False)
+        def _open_droplet(self):
+            try:
+                launch_droplet()
+            except OSError as exc:
+                self._append_log(f"Could not start Droplet: {exc}")
+                self._details.show()
+                return
+            self.accept()
+
+        def _on_update_failed(self, exc: UpdateError):
             self.exit_code = 1
-            self._title.setText("Update failed")
-            self._message.setText(msg)
-            self._close.setText("Close")
+            self._append_log(str(exc))
+            if isinstance(exc, DependencyError):
+                retry = self._retry_packages
+            else:
+                retry = self._retry_check
+            self._show("The update didn't finish",
+                       exc.user_message or NOTHING_CHANGED,
+                       primary=("Try again", retry),
+                       secondary=("Close", self.reject))
+
+        # ── details ──
 
         def _append_log(self, msg: str):
             self._log.appendPlainText(msg)
+            self._details.show()
+
+        def _toggle_details(self):
+            shown = not self._log.isVisible()
+            self._log.setVisible(shown)
+            self._details.setText("Hide details" if shown else "Show details")
 
         def reject(self):
             # Never close in the middle of a check or an update.
@@ -568,7 +790,7 @@ def _confirm(question: str) -> bool:
 
 
 def run_console(check_only: bool = False, auto_confirm: bool = False,
-                if_outdated: bool = False) -> int:
+                if_outdated: bool = False, from_droplet: bool = False) -> int:
     if not if_outdated:
         print("Checking for updates …")
     try:
@@ -593,12 +815,12 @@ def run_console(check_only: bool = False, auto_confirm: bool = False,
         return 0
 
     try:
-        apply_update(plan)
+        apply_update(plan, step=print)
     except UpdateError as exc:
         print(f"\nUpdate FAILED: {exc}")
         return 1
 
-    print(f"\n{AFTER_UPDATE}")
+    print("\nRestart Droplet to start using the new version.")
     return 0
 
 
@@ -614,9 +836,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--if-outdated", action="store_true",
                         help="stay silent unless an update is available "
                              "(used when Droplet starts)")
+    parser.add_argument("--from-droplet", action="store_true",
+                        help="started by a running Droplet: 'Restart' exits "
+                             f"with code {RESTART_EXIT_CODE} so Droplet "
+                             "restarts itself")
     args = parser.parse_args(argv)
     options = dict(check_only=args.check, auto_confirm=args.yes,
-                   if_outdated=args.if_outdated)
+                   if_outdated=args.if_outdated, from_droplet=args.from_droplet)
 
     if not args.console:
         try:

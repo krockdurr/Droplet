@@ -17,6 +17,13 @@
 - **Dark mode** (Display → Dark, the moon button, or **Ctrl+Shift+D**) now darkens the whole interface, every tool window included, not only the plot.
 - Minimum window width went from about 1030 px to about 840 px.
 
+## Updater
+
+- **Simpler window**: one short message and at most two buttons per step (*Update* / *Not now*, *Restart* / *Later*, *Try again* / *Close*). Version numbers only; the GitHub branch, update method and backup folder are no longer shown. A progress bar shows the current step in plain words, and the technical log is behind **Show details**.
+- **No more re-running the installer after an update.** If the update changes `requirements.txt`, the updater installs the new packages into Droplet's `.venv` itself, the same way the installers do. The menu shortcut / Droplet.app / desktop shortcut keep working since they only point at the `.venv` and `Droplet.py`.
+- **Restart button**: when the update is done, *Restart* closes Droplet and opens the new version. Run on its own (not from Droplet), the updater offers *Open Droplet* instead.
+- If something fails, the window says whether anything was changed; if only the package step failed, *Try again* repeats just that step.
+
 ## Peaks list
 
 - Opens at a usable size (it used to shrink to a one-row list every time it opened) and rows keep their natural height.

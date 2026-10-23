@@ -15933,6 +15933,11 @@ def open_updater():
 
 check_updates_action.triggered.connect(open_updater)
 
+# "Restart" in the updater window closes Droplet and opens the updated one.
+from droplet_pkg.ui import update_checker as _update_checker
+_update_checker.on_restart_requested(
+    lambda: _update_checker.restart_droplet(app, main_win))
+
 
 _previous_versions_window = None
 
